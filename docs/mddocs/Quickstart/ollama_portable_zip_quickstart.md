@@ -12,6 +12,9 @@ This guide demonstrates how to use [Ollama portable zip](https://github.com/ipex
 > - Intel Arc A-Series GPU
 > - Intel Arc B-Series GPU
 
+> [!IMPORTANT]
+> The current Windows Ollama portable zip does not yet support `qwen3.5`-based models such as `sorc/qwen3.5-claude-4.6-opus`. Those models require a newer Windows Ollama/IPEX binary package than the one currently bundled in the portable zip.
+
 ## Table of Contents
 - [Windows Quickstart](#windows-quickstart)
   - [Prerequisites](#prerequisites)

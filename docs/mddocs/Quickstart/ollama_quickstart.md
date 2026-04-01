@@ -62,12 +62,18 @@ Activate the `llm-cpp` conda environment and initialize Ollama by executing the 
 
 - For **Windows users**:
 
-  Please run the following command with **administrator privilege in Miniforge Prompt**.
+  Please run the following command in Miniforge Prompt.
 
   ```cmd
   conda activate llm-cpp
   init-ollama.bat
   ```
+
+> [!NOTE]
+> On Windows, `init-ollama.bat` copies the Ollama binaries from the installed `bigdl-core-cpp` package by default, so administrator privileges are no longer required. If you prefer symbolic links, set `IPEX_LLM_INIT_MODE=symlink` before running `init-ollama.bat`.
+
+> [!IMPORTANT]
+> Windows Ollama support for newer model families is determined by the `bigdl-core-cpp` package that provides the bundled Ollama binaries. Keep using `pip install --pre --upgrade ipex-llm[cpp]` on Windows so pip can pick up newer `bigdl-core-cpp` builds when they are published.
 
 > [!NOTE]
 > If you have installed higher version `ipex-llm[cpp]` and want to upgrade your ollama binary file, don't forget to remove old binary files first and initialize again with `init-ollama` or `init-ollama.bat`.
@@ -206,7 +212,7 @@ An example process of interacting with model with `ollama run example` looks lik
 
 ### Troubleshooting
 #### 1. Unable to run the initialization script
-If you are unable to run `init-ollama.bat`, please make sure you have installed `ipex-llm[cpp]` in your conda environment. If you have installed it, please check if you have activated the correct conda environment. Also, if you are using Windows, please make sure you have run the script with administrator privilege in prompt terminal.
+If you are unable to run `init-ollama.bat`, please make sure you have installed `ipex-llm[cpp]` in your conda environment. If you have installed it, please check if you have activated the correct conda environment.
 
 #### 2. Why model is always loaded again after several minutes
 Ollama will unload model from gpu memory in every 5 minutes as default. For latest version of ollama, you could set `OLLAMA_KEEP_ALIVE=-1` to keep the model loaded in memory. Reference issue: https://github.com/intel-analytics/ipex-llm/issues/11608
@@ -249,3 +255,21 @@ When you start `ollama serve` and execute `ollama run <model_name>`, but `ollama
 When you start `ollama serve` and execute `ollama run <model_name>`, but encounter the error `The program was built for 1 devices. Build program log for 'Intel(R) Arc(TM) A770 Graphics':`. This may be caused by the command `set/export SYCL_CACHE_PERSISTENT=1`. Please run commands as below:
 
 run `unset SYCL_CACHE_PERSISTENT` in the terminal; if the variable has been written into a configuration file such as `~/.bashrc`, you need to manually delete or comment out the conrresponding line.
+
+#### 12. `unknown model architecture: 'qwen35'` when pulling `sorc/qwen3.5-claude-4.6-opus`
+On Windows, Ollama model-architecture support comes from the binary package `bigdl-core-cpp`, not from the Python files in this repo. If the installed Windows Ollama binary predates `qwen35` support, `ollama pull sorc/qwen3.5-claude-4.6-opus` will fail with an unknown architecture error.
+
+Please check the installed binary package first:
+
+```cmd
+python -m pip show bigdl-core-cpp
+```
+
+Then upgrade with:
+
+```cmd
+pip install --pre --upgrade ipex-llm[cpp]
+init-ollama.bat
+```
+
+If the newest published Windows `bigdl-core-cpp` build still does not include `qwen35`, the model cannot be loaded on Windows until a newer Windows Ollama/IPEX binary is published.

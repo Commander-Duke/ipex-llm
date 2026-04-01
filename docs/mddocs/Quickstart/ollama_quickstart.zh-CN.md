@@ -62,12 +62,18 @@ IPEX-LLM 现在已支持在 Linux 和 Windows 系统上运行 `Ollama`。
 
 - **Windows 用户**:
 
-  请**在 Miniforge Prompt 中使用管理员权限** 运行以下命令。
+  请在 Miniforge Prompt 中运行以下命令。
 
   ```cmd
   conda activate llm-cpp
   init-ollama.bat
   ```
+
+> [!NOTE]
+> 在 Windows 上，`init-ollama.bat` 默认会把已安装 `bigdl-core-cpp` 包中的 Ollama 二进制文件复制到当前目录，因此不再要求管理员权限。如果你更希望使用符号链接，可以在运行 `init-ollama.bat` 之前设置 `IPEX_LLM_INIT_MODE=symlink`。
+
+> [!IMPORTANT]
+> Windows 上较新的 Ollama 模型家族支持由 `bigdl-core-cpp` 提供的二进制文件决定，而不是由本仓库中的 Python 代码决定。因此在 Windows 上请继续使用 `pip install --pre --upgrade ipex-llm[cpp]`，以便在新版 `bigdl-core-cpp` 发布后能够直接获取。
 
 > [!NOTE]
 > 如果你已经安装了更高版本的 `ipex-llm[cpp]`，并希望同时升级 ollama 可执行文件，请先删除目录下旧文件，然后使用 `init-ollama`（Linux）或 `init-ollama.bat`（Windows）重新初始化。
@@ -202,7 +208,7 @@ PARAMETER num_predict 64
 
 ### 故障排除
 #### 1. 无法运行初始化脚本
-如果你无法运行 `init-ollama.bat`，请确保你已经在 conda 环境中安装了 `ipex-llm[cpp]`。如果你已安装，请检查你是否已激活正确的 conda 环境。此外，如果你使用的是 Windows，请确保你已在提示终端中以管理员权限运行该脚本。
+如果你无法运行 `init-ollama.bat`，请确保你已经在 conda 环境中安装了 `ipex-llm[cpp]`。如果你已安装，请检查你是否已激活正确的 conda 环境。
 
 #### 2. 为什么模型总是几分钟后再次加载
 Ollama 默认每 5 分钟从 GPU 内存卸载一次模型。针对 ollama 的最新版本，你可以设置 `OLLAMA_KEEP_ALIVE=-1` 来将模型保持在显存上。请参阅此问题：https://github.com/intel-analytics/ipex-llm/issues/11608
@@ -244,3 +250,21 @@ Ollama 默认每 5 分钟从 GPU 内存卸载一次模型。针对 ollama 的最
 当启动`ollama serve`或者`ollama run <model_name>`时，产生报错`The program was built for 1 devices. Build program log for 'Intel(R) Arc(TM) A770 Graphics':`， 这是因为设置了`SYCL_CACHE_PERSISTENT=1`。请按照以下命令操作：
 
 在命令行中输入`unset SYCL_CACHE_PERSISTENT`；如果写入了配置文件，比如`~.bashrc`等，需要手动删去或注释掉对应的行。
+
+#### 12. 执行 `ollama pull sorc/qwen3.5-claude-4.6-opus` 时出现 `unknown model architecture: 'qwen35'`
+在 Windows 上，Ollama 对模型架构的支持来自 `bigdl-core-cpp` 提供的二进制包，而不是来自本仓库中的 Python 文件。如果当前安装的 Windows Ollama 二进制版本早于 `qwen35` 支持，那么执行 `ollama pull sorc/qwen3.5-claude-4.6-opus` 时就会报出未知架构错误。
+
+请先检查当前安装的二进制包版本：
+
+```cmd
+python -m pip show bigdl-core-cpp
+```
+
+然后执行升级：
+
+```cmd
+pip install --pre --upgrade ipex-llm[cpp]
+init-ollama.bat
+```
+
+如果最新已发布的 Windows `bigdl-core-cpp` 版本仍然没有包含 `qwen35`，那么在更新的 Windows Ollama/IPEX 二进制发布之前，这个模型仍然无法在 Windows 上加载。

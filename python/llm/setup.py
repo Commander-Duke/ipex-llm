@@ -324,7 +324,11 @@ def setup_package():
                             "onednn==2025.0.1;platform_system=='Windows'",
                             "dpcpp-cpp-rt==2025.0.2"]
 
-    cpp_requires = ["bigdl-core-cpp==" + CORE_XE_VERSION,
+    # Windows Ollama/llama.cpp model support is driven by the binary package
+    # shipped in bigdl-core-cpp. Keep Linux pinned, but allow newer Windows
+    # builds so newer model architectures can land without a repo respin.
+    cpp_requires = ["bigdl-core-cpp==" + CORE_XE_VERSION + ";platform_system!='Windows'",
+                    "bigdl-core-cpp>=2.7.0b20251029,<3.0.0;platform_system=='Windows'",
                     "onednn-devel==2025.0.1;platform_system=='Windows'",
                     "onednn==2025.0.1;platform_system=='Windows'",
                     "dpcpp-cpp-rt==2025.0.2;platform_system=='Windows'",
@@ -378,7 +382,8 @@ def setup_package():
             'Programming Language :: Python :: Implementation :: CPython'],
         scripts={
             'Linux': ['src/ipex_llm/cli/llm-cli', 'src/ipex_llm/cli/llm-chat', 'scripts/ipex-llm-init'],
-            'Windows': ['src/ipex_llm/cli/llm-cli.ps1', 'src/ipex_llm/cli/llm-chat.ps1', 'scripts/ipex-llm-init.bat'],
+            'Windows': ['src/ipex_llm/cli/llm-cli.ps1', 'src/ipex_llm/cli/llm-chat.ps1',
+                        'scripts/ipex-llm-init.bat', 'scripts/init-ollama.bat'],
         }[platform_name],
         platforms=['windows']
     )

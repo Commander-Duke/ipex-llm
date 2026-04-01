@@ -1,0 +1,38 @@
+[
+  {
+    "sha": "3d8f85e5c24d621fca1428e14e34fe8e34faa906",
+    "filename": "ml/backend.go",
+    "status": "modified",
+    "additions": 1,
+    "deletions": 0,
+    "changes": 1,
+    "blob_url": "https://github.com/ollama/ollama/blob/37363e731af8778ef9c8ee7dde9425bcdb7fde38/ml%2Fbackend.go",
+    "raw_url": "https://github.com/ollama/ollama/raw/37363e731af8778ef9c8ee7dde9425bcdb7fde38/ml%2Fbackend.go",
+    "contents_url": "https://api.github.com/repos/ollama/ollama/contents/ml%2Fbackend.go?ref=37363e731af8778ef9c8ee7dde9425bcdb7fde38",
+    "patch": "@@ -195,6 +195,7 @@ type Tensor interface {\n \tConcat(ctx Context, t2 Tensor, dim int) Tensor\n \tRows(ctx Context, t2 Tensor) Tensor\n \tSetRows(ctx Context, src Tensor, idxs Tensor) Tensor\n+\tSetInplace(ctx Context, src Tensor, nb1, nb2, nb3, offset int) Tensor\n \tCopy(ctx Context, t2 Tensor) Tensor\n \tDuplicate(ctx Context) Tensor\n "
+  },
+  {
+    "sha": "c2ce30dd8cf80ea9c144392ba3152ba024ead498",
+    "filename": "ml/backend/ggml/ggml.go",
+    "status": "modified",
+    "additions": 15,
+    "deletions": 0,
+    "changes": 15,
+    "blob_url": "https://github.com/ollama/ollama/blob/37363e731af8778ef9c8ee7dde9425bcdb7fde38/ml%2Fbackend%2Fggml%2Fggml.go",
+    "raw_url": "https://github.com/ollama/ollama/raw/37363e731af8778ef9c8ee7dde9425bcdb7fde38/ml%2Fbackend%2Fggml%2Fggml.go",
+    "contents_url": "https://api.github.com/repos/ollama/ollama/contents/ml%2Fbackend%2Fggml%2Fggml.go?ref=37363e731af8778ef9c8ee7dde9425bcdb7fde38",
+    "patch": "@@ -1345,6 +1345,21 @@ func (t *Tensor) SetRows(ctx ml.Context, src ml.Tensor, idxs ml.Tensor) ml.Tenso\n \t}\n }\n \n+func (t *Tensor) SetInplace(ctx ml.Context, src ml.Tensor, nb1, nb2, nb3, offset int) ml.Tensor {\n+\treturn &Tensor{\n+\t\tb: t.b,\n+\t\tt: C.ggml_set_inplace(\n+\t\t\tctx.(*Context).ctx,\n+\t\t\tt.t,\n+\t\t\tsrc.(*Tensor).t,\n+\t\t\tC.size_t(nb1),\n+\t\t\tC.size_t(nb2),\n+\t\t\tC.size_t(nb3),\n+\t\t\tC.size_t(offset),\n+\t\t),\n+\t}\n+}\n+\n func (t *Tensor) Copy(ctx ml.Context, t2 ml.Tensor) ml.Tensor {\n \treturn &Tensor{\n \t\tb: t.b,"
+  },
+  {
+    "sha": "d928efc98d4228a0229b3cade870d1efecad42e4",
+    "filename": "model/models/qwen3next/deltanet.go",
+    "status": "modified",
+    "additions": 29,
+    "deletions": 26,
+    "changes": 55,
+    "blob_url": "https://github.com/ollama/ollama/blob/37363e731af8778ef9c8ee7dde9425bcdb7fde38/model%2Fmodels%2Fqwen3next%2Fdeltanet.go",
+    "raw_url": "https://github.com/ollama/ollama/raw/37363e731af8778ef9c8ee7dde9425bcdb7fde38/model%2Fmodels%2Fqwen3next%2Fdeltanet.go",
+    "contents_url": "https://api.github.com/repos/ollama/ollama/contents/model%2Fmodels%2Fqwen3next%2Fdeltanet.go?ref=37363e731af8778ef9c8ee7dde9425bcdb7fde38",
+    "patch": "@@ -122,7 +122,7 @@ func (gdn *GatedDeltaNet) Forward(ctx ml.Context, hiddenStates, _ ml.Tensor, cac\n \t\tb := mixedBAReshaped.Slice(ctx, 0, 0, betaSize, 1)\n \t\ta := mixedBAReshaped.Slice(ctx, 0, betaSize, betaSize+alphaSize, 1)\n \n-\t\t// Keep beta layout consistent with qwen35 and llama.cpp:\n+\t\t// Keep beta layout consistent with qwen35.\n \t\t// [1, numVHeads, nSeqTokens, nSeqs]\n \t\tbeta = b.Contiguous(ctx, 1, numVHeads, nSeqTokens, nSeqs)\n \t\talpha = a.Contiguous(ctx, numVHeads, nSeqTokens, nSeqs)\n@@ -333,7 +333,6 @@ func (gdn *GatedDeltaNet) deltaNetChunked(\n \tq = q.Permute(ctx, 0, 2, 1, 3).Contiguous(ctx, headKDim, nTokens, numVHeads, nSeqs)\n \tk = k.Permute(ctx, 0, 2, 1, 3).Contiguous(ctx, headKDim, nTokens, numVHeads, nSeqs)\n \tv = v.Permute(ctx, 0, 2, 1, 3).Contiguous(ctx, headVDim, nTokens, numVHeads, nSeqs)\n-\t// Match llama.cpp delta-net-base layout:\n \t// gate/beta: [1, numVHeads, nTokens, nSeqs] -> [1, nTokens, numVHeads, nSeqs]\n \tgate = gate.Permute(ctx, 0, 2, 1, 3).Contiguous(ctx, 1, nTokens, numVHeads, nSeqs)\n \tbeta = beta.Permute(ctx, 0, 2, 1, 3).Contiguous(ctx, 1, nTokens, numVHeads, nSeqs)\n@@ -437,60 +436,64 @@ func (gdn *GatedDeltaNet) deltaNetChunked(\n \tkeyGDiff := k.Mul(ctx, gDiffExpReshaped)\n \tkeyGDiffT := keyGDiff.Permute(ctx, 1, 0, 2, 3).Contiguous(ctx)\n \n-\t// Process chunks and update state\n-\tvar coreAttnOut ml.Tensor\n-\tnewState := state\n+\t// Process chunks and update state.\n+\t// Keep a transposed view of v and recurrent state across chunks so the\n+\t// chunk loop does not need extra transpose+contiguous nodes.\n+\tvT := v.Permute(ctx, 1, 0, 2, 3).Contiguous(ctx, chunkSize, headVDim, nChunks, numVHeads*nSeqs)\n+\tstateT := state.Permute(ctx, 1, 0, 2, 3).Contiguous(ctx, headVDim, headVDim, 1, numVHeads*nSeqs)\n \n \tfor chunk := range nChunks {\n \t\tqChunk := q.Slice(ctx, 2, chunk, chunk+1, 1)\n-\t\tvChunk := v.Slice(ctx, 2, chunk, chunk+1, 1)\n+\t\tvTChunk := vT.Slice(ctx, 2, chunk, chunk+1, 1)\n \t\tgExpChunk := gExp.Slice(ctx, 2, chunk, chunk+1, 1)\n \t\tkCumdecayChunk := kCumdecay.Slice(ctx, 2, chunk, chunk+1, 1)\n \t\tattnChunk := attnKQ.Slice(ctx, 2, chunk, chunk+1, 1) // Pre-computed!\n \n-\t\t// state^T - permute is needed but Contiguous creates a copy\n-\t\tstateT := newState.Permute(ctx, 1, 0, 2, 3).Contiguous(ctx, headVDim, headVDim, 1, numVHeads*nSeqs)\n+\t\t// v'_t = k_cumdecay @ state_t\n+\t\tvTPrime := kCumdecayChunk.Mulmat(ctx, stateT)\n \n-\t\t// v_prime = k_cumdecay @ state\n-\t\tvPrime := stateT.Mulmat(ctx, kCumdecayChunk)\n-\n-\t\t// v_new = v - v_prime\n-\t\tvNew := vChunk.Sub(ctx, vPrime)\n-\t\tvNewT := vNew.Permute(ctx, 1, 0, 2, 3).Contiguous(ctx)\n+\t\t// v_t_new = v_t - v'_t\n+\t\tvTNewChunk := vTChunk.Sub(ctx, vTPrime)\n \n \t\t// attn_inter = (q * g_exp) @ state\n \t\tqGExp := qChunk.Mul(ctx, gExpChunk)\n \t\tattnInter := stateT.Mulmat(ctx, qGExp)\n \n \t\t// core_attn_out = attn_inter + attn @ v_new\n-\t\tvAttn := vNewT.Mulmat(ctx, attnChunk)\n+\t\tvAttn := vTNewChunk.Mulmat(ctx, attnChunk)\n \t\tcoreAttnOutChunk := attnInter.Add(ctx, vAttn)\n \n-\t\tif coreAttnOut == nil {\n-\t\t\tcoreAttnOut = coreAttnOutChunk\n-\t\t} else {\n-\t\t\tcoreAttnOut = coreAttnOut.Concat(ctx, coreAttnOutChunk, 1)\n-\t\t}\n+\t\tv = v.SetInplace(\n+\t\t\tctx,\n+\t\t\tcoreAttnOutChunk,\n+\t\t\tv.Stride(1),\n+\t\t\tv.Stride(2),\n+\t\t\tv.Stride(3),\n+\t\t\tchunk*v.Stride(2),\n+\t\t)\n \n \t\t// Update state for next chunk\n \t\tgExpLastChunk := gLastExp.Slice(ctx, 2, chunk, chunk+1, 1)\n \t\tkGDiffChunkT := keyGDiffT.Slice(ctx, 2, chunk, chunk+1, 1)\n-\t\tkgdMulVNew := vNewT.Mulmat(ctx, kGDiffChunkT)\n+\t\t// kgdmulvnew = key_gdiff_t @ v_new_t\n+\t\tkgdMulVNew := kGDiffChunkT.Mulmat(ctx, vTNewChunk)\n \n-\t\t// state = state * g_last + kgdmulvnew\n-\t\tgExpLastReshaped := gExpLastChunk.Contiguous(ctx).Reshape(ctx, 1, 1, numVHeads, nSeqs)\n-\t\tnewState = newState.Mul(ctx, gExpLastReshaped)\n-\t\tnewState = newState.Add(ctx, kgdMulVNew.Reshape(ctx, headVDim, headVDim, numVHeads, nSeqs))\n+\t\t// stateT = stateT * g_last + kgdmulvnew\n+\t\tstateT = stateT.Mul(ctx, gExpLastChunk)\n+\t\tstateT = stateT.Add(ctx, kgdMulVNew)\n \t}\n \n \t// Final reshape\n-\tcoreAttnOut = coreAttnOut.Contiguous(ctx, headVDim, chunkSize*nChunks, numVHeads, nSeqs)\n+\tcoreAttnOut := v.Contiguous(ctx, headVDim, chunkSize*nChunks, numVHeads, nSeqs)\n \n \t// Slice to remove padding\n \tif pad > 0 {\n \t\tcoreAttnOut = coreAttnOut.Slice(ctx, 1, 0, nTokens, 1)\n \t}\n \n+\t// Convert stateT back to cache layout [S_v, S_v, H_v, nSeqs]\n+\tnewState := stateT.Permute(ctx, 1, 0, 2, 3).Contiguous(ctx, headVDim, headVDim, numVHeads, nSeqs)\n+\n \t// Update delta state in cache\n \tcache.UpdateDeltaState(ctx, layer, newState.Reshape(ctx, headVDim, headVDim*numVHeads, nSeqs))\n "
+  }
+]

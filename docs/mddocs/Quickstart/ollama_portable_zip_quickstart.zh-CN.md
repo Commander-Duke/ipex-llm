@@ -13,6 +13,9 @@
 > - Intel Arc A-Series GPU
 > - Intel Arc B-Series GPU
 
+> [!IMPORTANT]
+> 当前 Windows Ollama portable zip 暂时还不支持 `sorc/qwen3.5-claude-4.6-opus` 这类基于 `qwen3.5` 的模型。这类模型需要比当前 portable zip 内置版本更新的 Windows Ollama/IPEX 二进制包。
+
 ## 目录
 - [Windows用户指南](#windows用户指南)
   - [系统环境安装](#系统环境准备)
