@@ -364,6 +364,40 @@ function Normalize-GgmlDllNames {
     }
 }
 
+function Ensure-GgmlBaseAlias {
+    param([string]$Directory)
+
+    $baseDll = Join-Path $Directory "ggml-base.dll"
+    $aliasDll = Join-Path $Directory "libggml-base.dll"
+
+    if (-not (Test-Path -LiteralPath $baseDll)) {
+        return
+    }
+
+    Copy-Item -LiteralPath $baseDll -Destination $aliasDll -Force
+}
+
+function Copy-LlvmMingwRuntimeDependencies {
+    param(
+        [string]$Destination,
+        [string]$LlvmBin
+    )
+
+    $candidates = @(
+        "libc++.dll",
+        "libunwind.dll"
+    )
+
+    foreach ($dll in $candidates) {
+        $source = Join-Path $LlvmBin $dll
+        if (Test-Path -LiteralPath $source) {
+            Copy-Item -LiteralPath $source -Destination (Join-Path $Destination $dll) -Force
+        } else {
+            Write-Warning "Unable to locate llvm-mingw runtime '$dll'."
+        }
+    }
+}
+
 function Copy-OneApiRuntimeDependencies {
     param([string]$Destination)
 
@@ -427,7 +461,10 @@ function Build-CpuDependencies {
     Invoke-Checked "cmake" @("--build", "--parallel", "$Parallel", "--preset", "CPU") $OllamaSourceRoot
     Invoke-Checked "cmake" @("--install", "build", "--component", "CPU", "--strip") $OllamaSourceRoot
 
-    Normalize-GgmlDllNames (Join-Path $InstallPrefix "lib\ollama")
+    $cpuOutDir = Join-Path $InstallPrefix "lib\ollama"
+    Normalize-GgmlDllNames $cpuOutDir
+    Ensure-GgmlBaseAlias $cpuOutDir
+    Copy-LlvmMingwRuntimeDependencies $cpuOutDir $LlvmBin
 }
 
 function Build-OllamaBinary {
