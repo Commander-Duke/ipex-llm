@@ -5,6 +5,10 @@ param(
     [string]$OllamaRef = "",
     [string]$LlvmMingwVersion = "20240619",
     [string]$GoVersion = "",
+    [string]$DnnlDir = "",
+    [string]$SyclDeviceArch = "",
+    [switch]$EnableExperimentalSyclF16,
+    [switch]$EnableExperimentalSyclDnn,
     [switch]$SkipCpuBuild,
     [switch]$SkipSyclBuild,
     [switch]$SkipGoBuild
@@ -33,6 +37,7 @@ $DownloadsDir = Join-Path $WorkRoot "downloads"
 $SourcesDir = Join-Path $WorkRoot "src"
 $ToolsDir = Join-Path $WorkRoot "tools"
 $Parallel = [Math]::Max([Environment]::ProcessorCount, 1)
+$script:DefaultOllamaNumCtx = 4096
 
 function Write-Step {
     param([string]$Message)
@@ -149,6 +154,70 @@ function Resolve-OneApiSetvars {
     }
 
     throw "Intel oneAPI setvars.bat was not found."
+}
+
+function Resolve-DnnlConfigDir {
+    param(
+        [string]$RequestedDir = "",
+        [string]$OneApiRoot = ""
+    )
+
+    $candidates = @()
+    foreach ($candidate in @($RequestedDir, $env:DNNL_DIR)) {
+        if ($candidate) {
+            $candidates += $candidate
+        }
+    }
+
+    if ($env:DNNLROOT) {
+        $candidates += Join-Path $env:DNNLROOT "lib\cmake\dnnl"
+        $candidates += Join-Path $env:DNNLROOT "latest\lib\cmake\dnnl"
+    }
+
+    if ($OneApiRoot) {
+        $candidates += Join-Path $OneApiRoot "dnnl\latest\lib\cmake\dnnl"
+        $candidates += Join-Path $OneApiRoot "lib\cmake\dnnl"
+    }
+
+    foreach ($candidate in $candidates | Where-Object { $_ } | Select-Object -Unique) {
+        if (-not (Test-Path -LiteralPath $candidate)) {
+            continue
+        }
+
+        $configPath = Join-Path $candidate "dnnl-config.cmake"
+        if (Test-Path -LiteralPath $configPath) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+
+    $searchRoots = @($env:DNNLROOT, $OneApiRoot) |
+        Where-Object { $_ -and (Test-Path -LiteralPath $_) } |
+        Select-Object -Unique
+
+    foreach ($root in $searchRoots) {
+        $match = Get-ChildItem -Path $root -Filter "dnnl-config.cmake" -Recurse -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+        if ($match) {
+            return $match.Directory.FullName
+        }
+    }
+
+    throw "Unable to locate oneDNN CMake config. Install Intel oneDNN / oneAPI Base Toolkit or pass -DnnlDir."
+}
+
+function Resolve-SyclDeviceArch {
+    param([string]$RequestedArch = "")
+
+    $resolved = if ($RequestedArch) {
+        $RequestedArch.Trim()
+    } elseif ($env:GGML_SYCL_DEVICE_ARCH) {
+        $env:GGML_SYCL_DEVICE_ARCH.Trim()
+    } else {
+        ""
+    }
+
+    return $resolved
 }
 
 function Import-BatchEnvironment {
@@ -1034,6 +1103,36 @@ function Ensure-GgmlBaseDiscoveryCopy {
     Copy-Item -LiteralPath $baseDll -Destination $discoveryDll -Force
 }
 
+function Resolve-DnnlBinDirectory {
+    param([string]$DnnlConfigDir = "")
+
+    if (-not $DnnlConfigDir) {
+        return $null
+    }
+
+    $cmakeRoot = Split-Path -Parent $DnnlConfigDir
+    if (-not $cmakeRoot) {
+        return $null
+    }
+
+    $libRoot = Split-Path -Parent $cmakeRoot
+    if (-not $libRoot) {
+        return $null
+    }
+
+    $installRoot = Split-Path -Parent $libRoot
+    if (-not $installRoot) {
+        return $null
+    }
+
+    $binDir = Join-Path $installRoot "bin"
+    if (Test-Path -LiteralPath $binDir) {
+        return $binDir
+    }
+
+    return $null
+}
+
 function Copy-LlvmMingwRuntimeDependencies {
     param(
         [string]$Destination,
@@ -1056,7 +1155,11 @@ function Copy-LlvmMingwRuntimeDependencies {
 }
 
 function Copy-OneApiRuntimeDependencies {
-    param([string]$Destination)
+    param(
+        [string]$Destination,
+        [string]$DnnlConfigDir = "",
+        [string]$OneApiRoot = ""
+    )
 
     $candidates = @(
         "sycl8.dll",
@@ -1073,22 +1176,58 @@ function Copy-OneApiRuntimeDependencies {
         "mkl_core.2.dll",
         "mkl_intel_thread.2.dll",
         "mkl_tbb_thread.2.dll",
+        "dnnl.dll",
         "tbb12.dll",
         "tbbmalloc.dll",
         "tbbmalloc_proxy.dll"
     )
 
+    $resolvedDnnlBin = Resolve-DnnlBinDirectory -DnnlConfigDir $DnnlConfigDir
+    $preferredTbbBin = $null
+    if ($env:TBBROOT) {
+        $candidate = Join-Path $env:TBBROOT "bin"
+        if (Test-Path -LiteralPath $candidate) {
+            $preferredTbbBin = $candidate
+        }
+    }
+
     $searchRoots = @(
-        (Join-Path $env:CMPLR_ROOT "bin"),
-        (Join-Path $env:CMPLR_ROOT "bin\compiler"),
-        (Join-Path $env:MKLROOT "bin"),
-        (Join-Path $env:TBBROOT "bin")
+        $(if ($env:CMPLR_ROOT) { Join-Path $env:CMPLR_ROOT "bin" }),
+        $(if ($env:CMPLR_ROOT) { Join-Path $env:CMPLR_ROOT "bin\compiler" }),
+        $(if ($env:MKLROOT) { Join-Path $env:MKLROOT "bin" }),
+        $(if ($env:TBBROOT) { Join-Path $env:TBBROOT "bin" }),
+        $(if ($env:DNNLROOT) { Join-Path $env:DNNLROOT "bin" }),
+        $resolvedDnnlBin,
+        $(if ($OneApiRoot) { Join-Path $OneApiRoot "bin" })
     ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique
 
     foreach ($dll in $candidates) {
         $match = $null
+
+        if ($preferredTbbBin -and $dll -like "tbb*.dll") {
+            $preferredSource = Join-Path $preferredTbbBin $dll
+            if (Test-Path -LiteralPath $preferredSource) {
+                $match = Get-Item -LiteralPath $preferredSource
+            }
+        }
+
         foreach ($root in $searchRoots) {
+            if ($match) {
+                break
+            }
+
+            $directSource = Join-Path $root $dll
+            if (Test-Path -LiteralPath $directSource) {
+                $match = Get-Item -LiteralPath $directSource
+                break
+            }
+
             $match = Get-ChildItem -LiteralPath $root -Filter $dll -Recurse -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.FullName -notmatch '\\vc14_uwp\\' -and
+                    $_.FullName -notmatch '\\vc14_uwd\\' -and
+                    $_.FullName -notmatch '\\vc_mt\\'
+                } |
                 Sort-Object FullName -Descending |
                 Select-Object -First 1
             if ($match) {
@@ -1169,7 +1308,12 @@ function Build-SyclBackend {
     param(
         [string]$OllamaSourceRoot,
         [string]$InstallPrefix,
-        [string]$OneApiSetvars
+        [string]$OneApiSetvars,
+        [string]$ResolvedDnnlDir,
+        [string]$ResolvedSyclDeviceArch = "",
+        [string]$ResolvedOneApiRoot = "",
+        [bool]$UseExperimentalSyclF16 = $false,
+        [bool]$UseExperimentalSyclDnn = $false
     )
 
     Write-Step "Building Windows SYCL backend"
@@ -1183,7 +1327,7 @@ function Build-SyclBackend {
     $syclOutDir = Join-Path $InstallPrefix "lib\ollama\sycl"
     New-Item -ItemType Directory -Path $syclOutDir -Force | Out-Null
 
-    Invoke-Checked "cmake" @(
+    $cmakeArgs = @(
         "-S", ".",
         "-B", $buildDir,
         "-G", "Ninja",
@@ -1192,8 +1336,27 @@ function Build-SyclBackend {
         "-DCMAKE_CXX_COMPILER=icx",
         "-DGGML_SYCL=ON",
         "-DGGML_SYCL_TARGET=INTEL",
+        "-DGGML_SYCL_F16=$(if ($UseExperimentalSyclF16) { 'ON' } else { 'OFF' })",
+        "-DGGML_SYCL_DNN=$(if ($UseExperimentalSyclDnn) { 'ON' } else { 'OFF' })",
+        "-DGGML_SYCL_GRAPH=ON",
+        "-DDNNL_DIR=$ResolvedDnnlDir",
         "-DOLLAMA_RUNNER_DIR=sycl"
-    ) $OllamaSourceRoot
+    )
+    if ($ResolvedSyclDeviceArch) {
+        $cmakeArgs += "-DGGML_SYCL_DEVICE_ARCH=$ResolvedSyclDeviceArch"
+        Write-Step "Using GGML_SYCL_DEVICE_ARCH=$ResolvedSyclDeviceArch"
+    }
+    if ($UseExperimentalSyclF16) {
+        Write-Step "Building SYCL backend with experimental GGML_SYCL_F16=ON"
+    } else {
+        Write-Step "Building SYCL backend with stable GGML_SYCL_F16=OFF"
+    }
+    if ($UseExperimentalSyclDnn) {
+        Write-Step "Building SYCL backend with experimental GGML_SYCL_DNN=ON from $ResolvedDnnlDir"
+    } else {
+        Write-Step "Building SYCL backend with stable GGML_SYCL_DNN=OFF"
+    }
+    Invoke-Checked "cmake" $cmakeArgs $OllamaSourceRoot
 
     Invoke-Checked "cmake" @("--build", $buildDir, "--target", "ggml-sycl", "--parallel", "$Parallel") $OllamaSourceRoot
 
@@ -1216,7 +1379,7 @@ function Build-SyclBackend {
     Ensure-GgmlBaseDiscoveryCopy $rootOutDir
 
     Copy-Item -LiteralPath $builtDll -Destination (Join-Path $syclOutDir "ggml-sycl.dll") -Force
-    Copy-OneApiRuntimeDependencies $syclOutDir
+    Copy-OneApiRuntimeDependencies -Destination $syclOutDir -DnnlConfigDir $ResolvedDnnlDir -OneApiRoot $ResolvedOneApiRoot
     Copy-SyclRootRuntimeDependencies -SourceDirectory $syclOutDir -DestinationDirectory $rootOutDir
 }
 
@@ -1229,6 +1392,22 @@ setlocal
 
 @REM Prefer bundled runtimes and avoid inheriting stale Intel device filters.
 set "PATH=%~dp0;%~dp0lib\ollama;%~dp0lib\ollama\sycl;%PATH%"
+
+@REM SYCL persistent cache can reduce warm-up time, but some recent Windows
+@REM Intel runtime stacks become unstable when it is forced globally. Leave it
+@REM as an opt-in environment override instead of enabling it by default.
+
+@REM Shared-memory Intel iGPUs can report a huge VRAM figure and make Ollama
+@REM pick an oversized default context. Keep a conservative default unless the
+@REM user explicitly overrides OLLAMA_CONTEXT_LENGTH before launch. Preserve a
+@REM legacy OLLAMA_NUM_CTX override for older wrappers.
+if not defined OLLAMA_CONTEXT_LENGTH (
+  if defined OLLAMA_NUM_CTX (
+    set "OLLAMA_CONTEXT_LENGTH=%OLLAMA_NUM_CTX%"
+  ) else (
+    set "OLLAMA_CONTEXT_LENGTH=4096"
+  )
+)
 
 set "OLLAMA_NUM_GPU=999"
 set "OLLAMA_KEEP_ALIVE=-1"
@@ -1266,7 +1445,9 @@ function Write-BuildMetadata {
         [string]$OllamaCommit,
         [string]$GoVersionText,
         [string]$LlamaUpstream,
-        [string]$LlamaCommit
+        [string]$LlamaCommit,
+        [string]$ResolvedDnnlDir = "",
+        [string]$ResolvedSyclDeviceArch = ""
     )
 
     $metadata = [ordered]@{
@@ -1277,6 +1458,15 @@ function Write-BuildMetadata {
         llama_sync_commit  = $LlamaCommit
         go_version         = $GoVersionText
         llvm_mingw_version = $LlvmMingwVersion
+        ollama_context_length_default = $script:DefaultOllamaNumCtx
+        legacy_ollama_num_ctx_passthrough = $true
+        sycl_cache_persistent_default = $false
+        sycl_cache_persistent_opt_in = $true
+        ggml_sycl_f16      = $EnableExperimentalSyclF16.IsPresent
+        ggml_sycl_dnn      = $EnableExperimentalSyclDnn.IsPresent
+        ggml_sycl_graph    = $true
+        dnnl_dir           = $ResolvedDnnlDir
+        ggml_sycl_device_arch = $ResolvedSyclDeviceArch
         output_dir         = (Resolve-Path $InstallPrefix).Path
     }
 
@@ -1327,9 +1517,17 @@ Patch-EmbeddingRequestContextDefaults -OllamaRoot $ollamaSourceRoot
 
 $vsDevCmd = Resolve-VsDevCmd
 $oneApiSetvars = Resolve-OneApiSetvars
+$oneApiRoot = Split-Path -Parent $oneApiSetvars
 $goRequestedVersion = if ($GoVersion) { Normalize-GoVersion $GoVersion } else { Get-GoVersionFromMod (Join-Path $ollamaSourceRoot "go.mod") }
 $goInfo = Resolve-GoTool -RequestedVersion $goRequestedVersion
 $llvmMingwBin = Ensure-LlvmMingw -Version $LlvmMingwVersion
+$resolvedSyclDeviceArch = Resolve-SyclDeviceArch -RequestedArch $SyclDeviceArch
+$resolvedDnnlDir = ""
+
+if (-not $SkipSyclBuild) {
+    Import-BatchEnvironment $oneApiSetvars @("intel64", "--force")
+    $resolvedDnnlDir = Resolve-DnnlConfigDir -RequestedDir $DnnlDir -OneApiRoot $oneApiRoot
+}
 
 if (-not $SkipCpuBuild) {
     Build-CpuDependencies -OllamaSourceRoot $ollamaSourceRoot -InstallPrefix $OutputDir -VsDevCmd $vsDevCmd -LlvmBin $llvmMingwBin
@@ -1340,7 +1538,15 @@ if (-not $SkipGoBuild) {
 }
 
 if (-not $SkipSyclBuild) {
-    Build-SyclBackend -OllamaSourceRoot $ollamaSourceRoot -InstallPrefix $OutputDir -OneApiSetvars $oneApiSetvars
+    Build-SyclBackend `
+        -OllamaSourceRoot $ollamaSourceRoot `
+        -InstallPrefix $OutputDir `
+        -OneApiSetvars $oneApiSetvars `
+        -ResolvedDnnlDir $resolvedDnnlDir `
+        -ResolvedSyclDeviceArch $resolvedSyclDeviceArch `
+        -ResolvedOneApiRoot $oneApiRoot `
+        -UseExperimentalSyclF16 $EnableExperimentalSyclF16.IsPresent `
+        -UseExperimentalSyclDnn $EnableExperimentalSyclDnn.IsPresent
 }
 
 Write-WindowsLaunchScripts -InstallPrefix $OutputDir
@@ -1351,7 +1557,9 @@ Write-BuildMetadata `
     -OllamaCommit $ollamaCommit `
     -GoVersionText $goInfo.Version `
     -LlamaUpstream $syncInfo.Upstream `
-    -LlamaCommit $syncInfo.FetchHead
+    -LlamaCommit $syncInfo.FetchHead `
+    -ResolvedDnnlDir $resolvedDnnlDir `
+    -ResolvedSyclDeviceArch $resolvedSyclDeviceArch
 
 Write-Step "Build complete"
 Write-Host "Output: $((Resolve-Path $OutputDir).Path)"

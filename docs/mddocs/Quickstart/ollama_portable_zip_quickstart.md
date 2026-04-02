@@ -149,22 +149,25 @@ For example, if you would like to run `deepseek-r1:7b` but the download speed fr
 
 By default, Ollama runs model with a context window of 2048 tokens. That is, the model can "remember" at most 2048 tokens of context.
 
-To increase the context length, you could set environment variable `OLLAMA_NUM_CTX` **before staring Ollama Serve**, as shwon below (if Ollama serve is already running, please make sure to stop it first):
+To increase the context length, you could set environment variable `OLLAMA_CONTEXT_LENGTH` **before staring Ollama Serve**, as shwon below (if Ollama serve is already running, please make sure to stop it first):
+
+> [!NOTE]
+> Recent Windows portable builds use a conservative `OLLAMA_CONTEXT_LENGTH=4096` default on Intel iGPU systems to avoid oversized shared-memory context selection. The wrapper also maps a legacy `OLLAMA_NUM_CTX` override onto `OLLAMA_CONTEXT_LENGTH` for compatibility. `SYCL_CACHE_PERSISTENT=1` is left as an optional manual override because some Windows Intel runtime stacks become unstable when it is forced globally.
 
 - For **Windows** users:
 
   - Open "Command Prompt", and navigate to the extracted folder through `cd /d PATH\TO\EXTRACTED\FOLDER`
-  - Set `OLLAMA_NUM_CTX` to the desired length in the "Command Prompt, e.g. `set OLLAMA_NUM_CTX=16384`
+  - Set `OLLAMA_CONTEXT_LENGTH` to the desired length in the "Command Prompt, e.g. `set OLLAMA_CONTEXT_LENGTH=16384`
   - Start Ollama serve through `start-ollama.bat`
 
 - For **Linux** users:
 
   - In a terminal, navigate to the extracted folder through `cd PATH\TO\EXTRACTED\FOLDER`
-  - Set `OLLAMA_NUM_CTX` to the desired length in the terminal, e.g. `export OLLAMA_NUM_CTX=16384`
+  - Set `OLLAMA_CONTEXT_LENGTH` to the desired length in the terminal, e.g. `export OLLAMA_CONTEXT_LENGTH=16384`
   - Start Ollama serve through `./start-ollama.sh`
 
 > [!TIP]
-> `OLLAMA_NUM_CTX` has a higher priority than the `num_ctx` settings in a models' `Modelfile`.
+> `OLLAMA_CONTEXT_LENGTH` has a higher priority than the `num_ctx` settings in a models' `Modelfile`.
 
 > [!NOTE]
 > For versions earlier than `2.3.0b20250429`, please use `IPEX_LLM_NUM_CTX` instead.
