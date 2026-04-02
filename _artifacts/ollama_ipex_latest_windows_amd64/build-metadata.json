@@ -1,0 +1,10 @@
+{
+    "built_at_utc":  "2026-04-02T07:34:39.6129338Z",
+    "ollama_ref":  "main",
+    "ollama_commit":  "a8292dd85f234ef52f8b477dbbefbf9517f58ef5",
+    "llama_sync_upstream":  "https://github.com/ggml-org/llama.cpp.git",
+    "llama_sync_commit":  "ec98e2002",
+    "go_version":  "go version go1.24.1 windows/amd64",
+    "llvm_mingw_version":  "20240619",
+    "output_dir":  "C:\\Users\\Administrator\\Documents\\GitHub\\ipex-llm\\_tmp_build_latest_verify_full\\dist\\windows-amd64"
+}
