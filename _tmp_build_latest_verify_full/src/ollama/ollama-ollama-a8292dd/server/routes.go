@@ -104,6 +104,25 @@ type Server struct {
 	requestLogger *inferenceRequestLogger
 }
 
+const defaultEmbeddingNumCtx = 4096
+
+// Embedding requests should not inherit the aggressive VRAM-based chat default.
+// On large shared-memory Intel iGPUs that can inflate num_ctx enough to make
+// embed loads fail before the first request is processed.
+func withDefaultEmbeddingNumCtx(requestOpts map[string]any) map[string]any {
+	if value, ok := requestOpts["num_ctx"]; ok && value != nil {
+		return requestOpts
+	}
+
+	opts := make(map[string]any, len(requestOpts)+1)
+	for key, value := range requestOpts {
+		opts[key] = value
+	}
+
+	opts["num_ctx"] = int64(defaultEmbeddingNumCtx)
+	return opts
+}
+
 func init() {
 	switch mode {
 	case gin.DebugMode:
@@ -727,7 +746,8 @@ func (s *Server) EmbedHandler(c *gin.Context) {
 		return
 	}
 
-	r, m, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), []model.Capability{}, req.Options, req.KeepAlive)
+	embedOptions := withDefaultEmbeddingNumCtx(req.Options)
+	r, m, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), []model.Capability{}, embedOptions, req.KeepAlive)
 	if err != nil {
 		handleScheduleError(c, req.Model, err)
 		return
@@ -882,7 +902,8 @@ func (s *Server) EmbeddingsHandler(c *gin.Context) {
 
 	name := modelRef.Name
 
-	r, _, _, err := s.scheduleRunner(c.Request.Context(), name.String(), []model.Capability{}, req.Options, req.KeepAlive)
+	embedOptions := withDefaultEmbeddingNumCtx(req.Options)
+	r, _, _, err := s.scheduleRunner(c.Request.Context(), name.String(), []model.Capability{}, embedOptions, req.KeepAlive)
 	if err != nil {
 		handleScheduleError(c, req.Model, err)
 		return

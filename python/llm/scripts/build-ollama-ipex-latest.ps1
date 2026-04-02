@@ -931,6 +931,78 @@ endif()
     }
 }
 
+function Patch-EmbeddingRequestContextDefaults {
+    param([string]$OllamaRoot)
+
+    $routesPath = Join-Path $OllamaRoot "server\routes.go"
+    $routesContent = Get-Content -LiteralPath $routesPath -Raw
+
+    if ($routesContent -notmatch "withDefaultEmbeddingNumCtx") {
+        $routesContent = Replace-RequiredContent `
+            -Content $routesContent `
+            -OldValue @'
+type Server struct {
+	addr          net.Addr
+	sched         *Scheduler
+	defaultNumCtx int
+	requestLogger *inferenceRequestLogger
+}
+
+func init() {
+'@ `
+            -NewValue @'
+type Server struct {
+	addr          net.Addr
+	sched         *Scheduler
+	defaultNumCtx int
+	requestLogger *inferenceRequestLogger
+}
+
+const defaultEmbeddingNumCtx = 4096
+
+// Embedding requests should not inherit the aggressive VRAM-based chat default.
+// On large shared-memory Intel iGPUs that can inflate num_ctx enough to make
+// embed loads fail before the first request is processed.
+func withDefaultEmbeddingNumCtx(requestOpts map[string]any) map[string]any {
+	if value, ok := requestOpts["num_ctx"]; ok && value != nil {
+		return requestOpts
+	}
+
+	opts := make(map[string]any, len(requestOpts)+1)
+	for key, value := range requestOpts {
+		opts[key] = value
+	}
+
+	opts["num_ctx"] = int64(defaultEmbeddingNumCtx)
+	return opts
+}
+
+func init() {
+'@ `
+            -Description "embedding request default context helper"
+
+        $routesContent = Replace-RequiredContent `
+            -Content $routesContent `
+            -OldValue '	r, m, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), []model.Capability{}, req.Options, req.KeepAlive)' `
+            -NewValue @'
+	embedOptions := withDefaultEmbeddingNumCtx(req.Options)
+	r, m, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), []model.Capability{}, embedOptions, req.KeepAlive)
+'@ `
+            -Description "embed handler conservative default context"
+
+        $routesContent = Replace-RequiredContent `
+            -Content $routesContent `
+            -OldValue '	r, _, _, err := s.scheduleRunner(c.Request.Context(), name.String(), []model.Capability{}, req.Options, req.KeepAlive)' `
+            -NewValue @'
+	embedOptions := withDefaultEmbeddingNumCtx(req.Options)
+	r, _, _, err := s.scheduleRunner(c.Request.Context(), name.String(), []model.Capability{}, embedOptions, req.KeepAlive)
+'@ `
+            -Description "legacy embeddings handler conservative default context"
+
+        Set-Content -LiteralPath $routesPath -Value $routesContent -NoNewline
+    }
+}
+
 function Normalize-GgmlDllNames {
     param([string]$Directory)
 
@@ -1251,6 +1323,7 @@ $syclSourceDir = Overlay-SyclSources -LlamaRoot $llamaSourceRoot -OllamaRoot $ol
 Patch-SyclCompatibility -SyclDir $syclSourceDir
 Patch-WindowsSyclIntegratedGpuSupport -OllamaRoot $ollamaSourceRoot -SyclDir $syclSourceDir
 Patch-WindowsSharedGgmlBaseName -OllamaRoot $ollamaSourceRoot
+Patch-EmbeddingRequestContextDefaults -OllamaRoot $ollamaSourceRoot
 
 $vsDevCmd = Resolve-VsDevCmd
 $oneApiSetvars = Resolve-OneApiSetvars
