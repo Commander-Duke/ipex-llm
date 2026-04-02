@@ -348,6 +348,589 @@ function Patch-SyclCompatibility {
     }
 }
 
+function Replace-RequiredContent {
+    param(
+        [string]$Content,
+        [string]$OldValue,
+        [string]$NewValue,
+        [string]$Description
+    )
+
+    if (-not $Content.Contains($OldValue)) {
+        throw "Unable to apply patch: $Description"
+    }
+
+    return $Content.Replace($OldValue, $NewValue)
+}
+
+function Patch-WindowsSyclIntegratedGpuSupport {
+    param(
+        [string]$OllamaRoot,
+        [string]$SyclDir
+    )
+
+    $ggmlImplPath = Join-Path $OllamaRoot "ml\backend\ggml\ggml\src\ggml-impl.h"
+    $ggmlImplContent = Get-Content -LiteralPath $ggmlImplPath -Raw
+    if ($ggmlImplContent -notmatch "ggml_dxgi_pdh_get_device_memory_by_adapter") {
+        $ggmlImplContent = Replace-RequiredContent `
+            -Content $ggmlImplContent `
+            -OldValue 'GGML_API int ggml_dxgi_pdh_get_device_memory(const char* luid, size_t *free, size_t *total, bool is_integrated_gpu);' `
+            -NewValue @'
+GGML_API int ggml_dxgi_pdh_get_device_memory(const char* luid, size_t *free, size_t *total, bool is_integrated_gpu);
+GGML_API int ggml_dxgi_pdh_get_device_memory_by_adapter(const char * device_id, const char * description, size_t * free, size_t * total, bool is_integrated_gpu);
+'@ `
+            -Description "ggml DXGI/PDH adapter declaration"
+        Set-Content -LiteralPath $ggmlImplPath -Value $ggmlImplContent -NoNewline
+    }
+
+    $memDxgiPath = Join-Path $OllamaRoot "ml\backend\ggml\ggml\src\mem_dxgi_pdh.cpp"
+    $memDxgiContent = Get-Content -LiteralPath $memDxgiPath -Raw
+    if ($memDxgiContent -notmatch "ggml_dxgi_pdh_get_device_memory_by_adapter") {
+        $memDxgiContent = Replace-RequiredContent `
+            -Content $memDxgiContent `
+            -OldValue @'
+#include <windows.h>
+#include <pdh.h>
+#include <dxgi1_2.h>
+#include <sstream>
+'@ `
+            -NewValue @'
+#include <windows.h>
+#include <pdh.h>
+#include <dxgi1_2.h>
+#include <algorithm>
+#include <cctype>
+#include <sstream>
+'@ `
+            -Description "DXGI include extensions"
+
+        $memDxgiContent = Replace-RequiredContent `
+            -Content $memDxgiContent `
+            -OldValue @'
+struct GpuInfo {
+    std::wstring description; // debug field
+    LUID luid;
+'@ `
+            -NewValue @'
+struct GpuInfo {
+    std::wstring description; // debug field
+    std::string deviceId;
+    LUID luid;
+'@ `
+            -Description "GpuInfo device ID field"
+
+        $memDxgiContent = Replace-RequiredContent `
+            -Content $memDxgiContent `
+            -OldValue @'
+template <typename T>
+static inline double b_to_gb(T n)
+{
+    return (double(n) / (1024.0 * 1024 * 1024));
+}
+
+/*
+Fetch the GPU adapter 'dedicated memory' and 'shared memory' using DXGI
+*/
+'@ `
+            -NewValue @'
+template <typename T>
+static inline double b_to_gb(T n)
+{
+    return (double(n) / (1024.0 * 1024 * 1024));
+}
+
+static std::string normalize_device_id(std::string value) {
+    value.erase(std::remove_if(value.begin(), value.end(), [](unsigned char ch) {
+        return std::isspace(ch) != 0;
+    }), value.end());
+
+    if (value.rfind("0x", 0) == 0 || value.rfind("0X", 0) == 0) {
+        value = value.substr(2);
+    }
+
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return (char) std::tolower(ch);
+    });
+
+    size_t first_non_zero = value.find_first_not_of('0');
+    if (first_non_zero == std::string::npos) {
+        return value.empty() ? std::string() : "0";
+    }
+
+    return value.substr(first_non_zero);
+}
+
+static std::string normalize_description(std::string value) {
+    auto is_space = [](unsigned char ch) {
+        return std::isspace(ch) != 0;
+    };
+
+    while (!value.empty() && is_space((unsigned char) value.front())) {
+        value.erase(value.begin());
+    }
+
+    while (!value.empty() && is_space((unsigned char) value.back())) {
+        value.pop_back();
+    }
+
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return (char) std::tolower(ch);
+    });
+
+    return value;
+}
+
+static std::string format_device_id(UINT device_id) {
+    char buffer[16];
+    snprintf(buffer, sizeof(buffer), "%x", device_id);
+    return normalize_device_id(buffer);
+}
+
+static std::string utf8_from_wstring(const std::wstring & value) {
+    if (value.empty()) {
+        return {};
+    }
+
+    int size = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (size <= 1) {
+        return {};
+    }
+
+    std::string result(size, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, result.data(), size, nullptr, nullptr);
+    result.pop_back();
+    return result;
+}
+
+/*
+Fetch the GPU adapter 'dedicated memory' and 'shared memory' using DXGI
+*/
+'@ `
+            -Description "DXGI helper functions"
+
+        $memDxgiContent = Replace-RequiredContent `
+            -Content $memDxgiContent `
+            -OldValue @'
+            GpuInfo info;
+            fetch_dxgi_adapter_desc1(desc, &info);
+            info.description = std::wstring(desc.Description);
+            info.luid = desc.AdapterLuid;
+'@ `
+            -NewValue @'
+            GpuInfo info;
+            fetch_dxgi_adapter_desc1(desc, &info);
+            info.description = std::wstring(desc.Description);
+            info.deviceId = format_device_id(desc.DeviceId);
+            info.luid = desc.AdapterLuid;
+'@ `
+            -Description "DXGI adapter device ID capture"
+
+        $memDxgiContent = Replace-RequiredContent `
+            -Content $memDxgiContent `
+            -OldValue @'
+    dll_functions.PdhCloseQuery(query);
+    return true;
+}
+
+
+extern "C" {
+'@ `
+            -NewValue @'
+    dll_functions.PdhCloseQuery(query);
+    return true;
+}
+
+static GpuInfo * find_gpu_by_luid(std::vector<GpuInfo> & gpus, const char * luid) {
+    if (luid == nullptr || *luid == '\0') {
+        return nullptr;
+    }
+
+    for (auto & gpu : gpus) {
+        char luid_buffer[32];
+        snprintf(luid_buffer, sizeof(luid_buffer), "0x%08x%08x", gpu.luid.HighPart, gpu.luid.LowPart);
+        if (std::string(luid_buffer) == std::string(luid)) {
+            return &gpu;
+        }
+    }
+
+    return nullptr;
+}
+
+static GpuInfo * find_gpu_by_adapter(std::vector<GpuInfo> & gpus, const char * device_id, const char * description) {
+    std::string normalized_device_id = device_id != nullptr ? normalize_device_id(device_id) : std::string();
+    std::string normalized_description = description != nullptr ? normalize_description(description) : std::string();
+
+    GpuInfo * device_id_match = nullptr;
+    GpuInfo * description_match = nullptr;
+
+    for (auto & gpu : gpus) {
+        bool matches_device_id = !normalized_device_id.empty() && gpu.deviceId == normalized_device_id;
+
+        std::string gpu_description = normalize_description(utf8_from_wstring(gpu.description));
+        bool matches_description = !normalized_description.empty() &&
+            (gpu_description == normalized_description ||
+             gpu_description.find(normalized_description) != std::string::npos ||
+             normalized_description.find(gpu_description) != std::string::npos);
+
+        if (matches_device_id && matches_description) {
+            return &gpu;
+        }
+
+        if (matches_device_id && device_id_match == nullptr) {
+            device_id_match = &gpu;
+        }
+
+        if (matches_description && description_match == nullptr) {
+            description_match = &gpu;
+        }
+    }
+
+    return device_id_match != nullptr ? device_id_match : description_match;
+}
+
+static int ggml_dxgi_pdh_get_gpu_memory(GpuInfo * targetGpu, const char * identifier, size_t * free, size_t * total, bool is_integrated_gpu) {
+    if (targetGpu == nullptr) {
+        return ERROR_NOT_FOUND;
+    }
+
+    int status = get_gpu_memory_usage(*targetGpu);
+    if (!status) {
+        GGML_LOG_ERROR("Failed to get GPU memory usage.\n");
+        return ERROR_DEVICE_NOT_AVAILABLE;
+    }
+
+    if (is_integrated_gpu) {
+        GGML_LOG_DEBUG("Integrated GPU (%ls) with adapter %s detected. Shared Total: %.2f bytes (%.2f GB), Shared Usage: %.2f bytes (%.2f GB), Dedicated Total: %.2f bytes (%.2f GB), Dedicated Usage: %.2f bytes (%.2f GB)\n",
+            targetGpu->description.c_str(), identifier, targetGpu->sharedTotal, b_to_gb(targetGpu->sharedTotal), targetGpu->sharedUsage, b_to_gb(targetGpu->sharedUsage),
+            targetGpu->dedicatedTotal, b_to_gb(targetGpu->dedicatedTotal), targetGpu->dedicatedUsage, b_to_gb(targetGpu->dedicatedUsage));
+        *free = (targetGpu->sharedTotal - targetGpu->sharedUsage) + (targetGpu->dedicatedTotal - targetGpu->dedicatedUsage);
+        *total = targetGpu->sharedTotal + targetGpu->dedicatedTotal;
+    } else {
+        GGML_LOG_DEBUG("Discrete GPU (%ls) with adapter %s detected. Dedicated Total: %.2f bytes (%.2f GB), Dedicated Usage: %.2f bytes (%.2f GB)\n",
+            targetGpu->description.c_str(), identifier, targetGpu->dedicatedTotal, b_to_gb(targetGpu->dedicatedTotal), targetGpu->dedicatedUsage, b_to_gb(targetGpu->dedicatedUsage));
+        *free = targetGpu->dedicatedTotal - targetGpu->dedicatedUsage;
+        *total = targetGpu->dedicatedTotal;
+    }
+
+    return ERROR_SUCCESS;
+}
+
+
+extern "C" {
+'@ `
+            -Description "DXGI adapter matching helpers"
+
+        $memDxgiContent = Replace-RequiredContent `
+            -Content $memDxgiContent `
+            -OldValue @'
+    int ggml_dxgi_pdh_get_device_memory(const char* luid, size_t *free, size_t *total, bool is_integrated_gpu) {
+
+        std::lock_guard<std::mutex> lock(ggml_dxgi_pdh_lock);
+
+        // Enumerate GPUs using DXGI and find the matching LUID
+        // This also fetches the total memory info for each of the enumerated GPUs
+        std::vector<GpuInfo> gpus = get_dxgi_gpu_infos();
+        GpuInfo *targetGpu = nullptr;
+        for (auto& gpu : gpus) {
+            char luid_buffer[32]; // "0x" + 16 hex digits + null terminator
+            snprintf(luid_buffer, sizeof(luid_buffer), "0x%08x%08x", gpu.luid.HighPart, gpu.luid.LowPart);
+            std::string gpu_luid_str(luid_buffer);
+            if (gpu_luid_str == std::string(luid)) {
+                targetGpu = &gpu;
+                break;
+            }
+        }
+        if (!targetGpu) {
+            GGML_LOG_ERROR("GPU with LUID %s not found.\n", luid);
+            return ERROR_NOT_FOUND;
+        }
+
+        // Get the current memory usage for the target GPU
+        int status = get_gpu_memory_usage(*targetGpu);
+        if (!status) {
+            GGML_LOG_ERROR("Failed to get GPU memory usage.\n");
+            return ERROR_DEVICE_NOT_AVAILABLE;
+        }
+
+        // Calculate the free memory based on whether it's an integrated or discrete GPU
+        if (is_integrated_gpu) {
+            // IGPU free = SharedTotal - SharedUsage
+            GGML_LOG_DEBUG("Integrated GPU (%ls) with LUID %s detected. Shared Total: %.2f bytes (%.2f GB), Shared Usage: %.2f bytes (%.2f GB), Dedicated Total: %.2f bytes (%.2f GB), Dedicated Usage: %.2f bytes (%.2f GB)\n", targetGpu->description.c_str(), luid, targetGpu->sharedTotal, b_to_gb(targetGpu->sharedTotal), targetGpu->sharedUsage, b_to_gb(targetGpu->sharedUsage), targetGpu->dedicatedTotal, b_to_gb(targetGpu->dedicatedTotal), targetGpu->dedicatedUsage, b_to_gb(targetGpu->dedicatedUsage));
+            *free = (targetGpu->sharedTotal - targetGpu->sharedUsage) + (targetGpu->dedicatedTotal - targetGpu->dedicatedUsage); // Some IGPUs also have dedicated memory, which can be used along with the IGPU's shared memory
+            *total = targetGpu->sharedTotal + targetGpu->dedicatedTotal;
+        }
+        else {
+            // DGPU free = DedicatedTotal - DedicatedUsage
+            GGML_LOG_DEBUG("Discrete GPU (%ls) with LUID %s detected. Dedicated Total: %.2f bytes (%.2f GB), Dedicated Usage: %.2f bytes (%.2f GB)\n", targetGpu->description.c_str(), luid, targetGpu->dedicatedTotal, b_to_gb(targetGpu->dedicatedTotal), targetGpu->dedicatedUsage, b_to_gb(targetGpu->dedicatedUsage));
+            *free = targetGpu->dedicatedTotal - targetGpu->dedicatedUsage;
+            *total = targetGpu->dedicatedTotal;
+        }
+
+        return ERROR_SUCCESS;
+    }
+'@ `
+            -NewValue @'
+    int ggml_dxgi_pdh_get_device_memory(const char* luid, size_t *free, size_t *total, bool is_integrated_gpu) {
+
+        std::lock_guard<std::mutex> lock(ggml_dxgi_pdh_lock);
+
+        std::vector<GpuInfo> gpus = get_dxgi_gpu_infos();
+        GpuInfo *targetGpu = find_gpu_by_luid(gpus, luid);
+        if (!targetGpu) {
+            GGML_LOG_ERROR("GPU with LUID %s not found.\n", luid);
+            return ERROR_NOT_FOUND;
+        }
+
+        return ggml_dxgi_pdh_get_gpu_memory(targetGpu, luid, free, total, is_integrated_gpu);
+    }
+
+    int ggml_dxgi_pdh_get_device_memory_by_adapter(const char * device_id, const char * description, size_t * free, size_t * total, bool is_integrated_gpu) {
+        std::lock_guard<std::mutex> lock(ggml_dxgi_pdh_lock);
+
+        std::vector<GpuInfo> gpus = get_dxgi_gpu_infos();
+        GpuInfo * targetGpu = find_gpu_by_adapter(gpus, device_id, description);
+        if (!targetGpu) {
+            GGML_LOG_ERROR("GPU with device ID %s and description %s not found.\n",
+                device_id != nullptr ? device_id : "<null>",
+                description != nullptr ? description : "<null>");
+            return ERROR_NOT_FOUND;
+        }
+
+        const char * identifier = device_id != nullptr && *device_id != '\0' ? device_id : description;
+        return ggml_dxgi_pdh_get_gpu_memory(targetGpu, identifier != nullptr ? identifier : "<unknown>", free, total, is_integrated_gpu);
+    }
+'@ `
+            -Description "DXGI adapter memory lookup"
+
+        $memDxgiContent = Replace-RequiredContent `
+            -Content $memDxgiContent `
+            -OldValue @'
+    void ggml_dxgi_pdh_release() {}
+    int ggml_dxgi_pdh_get_device_memory(const char* luid, size_t *free, size_t *total, bool is_integrated_gpu) {
+        return -1;
+    }
+'@ `
+            -NewValue @'
+    void ggml_dxgi_pdh_release() {}
+    int ggml_dxgi_pdh_get_device_memory(const char* luid, size_t *free, size_t *total, bool is_integrated_gpu) {
+        return -1;
+    }
+    int ggml_dxgi_pdh_get_device_memory_by_adapter(const char * device_id, const char * description, size_t * free, size_t * total, bool is_integrated_gpu) {
+        return -1;
+    }
+'@ `
+            -Description "DXGI adapter non-Windows stub"
+
+        Set-Content -LiteralPath $memDxgiPath -Value $memDxgiContent -NoNewline
+    }
+
+    $syclFile = Join-Path $SyclDir "ggml-sycl.cpp"
+    $syclContent = Get-Content -LiteralPath $syclFile -Raw
+    if ($syclContent -notmatch "ggml_dxgi_pdh_get_device_memory_by_adapter") {
+        $syclContent = Replace-RequiredContent `
+            -Content $syclContent `
+            -OldValue @'
+struct ggml_backend_sycl_device_context {
+    int device;
+    std::string name;
+    std::string description;
+};
+'@ `
+            -NewValue @'
+struct ggml_backend_sycl_device_context {
+    int device;
+    bool integrated;
+    std::string name;
+    std::string id;
+    std::string description;
+    std::string dxgi_device_id;
+};
+'@ `
+            -Description "SYCL device context fields"
+
+        $syclContent = Replace-RequiredContent `
+            -Content $syclContent `
+            -OldValue @'
+static void ggml_backend_sycl_device_get_memory(ggml_backend_dev_t dev, size_t * free, size_t * total) {
+    ggml_backend_sycl_device_context * ctx = (ggml_backend_sycl_device_context *)dev->context;
+    ggml_sycl_set_device(ctx->device);
+    SYCL_CHECK(CHECK_TRY_ERROR(
+    dpct::dev_mgr::instance().get_device(ctx->device).get_memory_info(*free, *total)));
+}
+'@ `
+            -NewValue @'
+static void ggml_backend_sycl_device_get_memory(ggml_backend_dev_t dev, size_t * free, size_t * total) {
+    ggml_backend_sycl_device_context * ctx = (ggml_backend_sycl_device_context *)dev->context;
+    ggml_sycl_set_device(ctx->device);
+
+#ifdef _WIN32
+    if (ctx->integrated && ggml_dxgi_pdh_init() == 0) {
+        int status = ggml_dxgi_pdh_get_device_memory_by_adapter(
+            ctx->dxgi_device_id.empty() ? nullptr : ctx->dxgi_device_id.c_str(),
+            ctx->description.empty() ? nullptr : ctx->description.c_str(),
+            free,
+            total,
+            true);
+        ggml_dxgi_pdh_release();
+        if (status == 0) {
+            return;
+        }
+    }
+#endif
+
+    SYCL_CHECK(CHECK_TRY_ERROR(
+    dpct::dev_mgr::instance().get_device(ctx->device).get_memory_info(*free, *total)));
+}
+'@ `
+            -Description "SYCL integrated GPU memory reporting"
+
+        $syclContent = Replace-RequiredContent `
+            -Content $syclContent `
+            -OldValue @'
+static enum ggml_backend_dev_type ggml_backend_sycl_device_get_type(ggml_backend_dev_t dev) {
+    GGML_UNUSED(dev);
+    return GGML_BACKEND_DEVICE_TYPE_GPU;
+}
+'@ `
+            -NewValue @'
+static enum ggml_backend_dev_type ggml_backend_sycl_device_get_type(ggml_backend_dev_t dev) {
+    ggml_backend_sycl_device_context * ctx = (ggml_backend_sycl_device_context *)dev->context;
+    return ctx->integrated ? GGML_BACKEND_DEVICE_TYPE_IGPU : GGML_BACKEND_DEVICE_TYPE_GPU;
+}
+'@ `
+            -Description "SYCL integrated GPU type"
+
+        $syclContent = Replace-RequiredContent `
+            -Content $syclContent `
+            -OldValue @'
+static void ggml_backend_sycl_device_get_props(ggml_backend_dev_t dev, ggml_backend_dev_props * props) {
+    props->name        = ggml_backend_sycl_device_get_name(dev);
+    props->description = ggml_backend_sycl_device_get_description(dev);
+    props->type        = ggml_backend_sycl_device_get_type(dev);
+    ggml_backend_sycl_device_get_memory(dev, &props->memory_free, &props->memory_total);
+
+    bool host_buffer = getenv("GGML_SYCL_NO_PINNED") == nullptr;
+#ifdef GGML_SYCL_NO_PEER_COPY
+    bool events = false;
+#else
+    bool events = true;
+#endif
+
+    props->caps = {
+        /* .async                 = */ true,
+        /* .host_buffer           = */ host_buffer,
+        /* .buffer_from_host_ptr  = */ false,
+        /* .events                = */ events,
+    };
+}
+'@ `
+            -NewValue @'
+static void ggml_backend_sycl_device_get_props(ggml_backend_dev_t dev, ggml_backend_dev_props * props) {
+    ggml_backend_sycl_device_context * ctx = (ggml_backend_sycl_device_context *)dev->context;
+    props->name        = ggml_backend_sycl_device_get_name(dev);
+    props->description = ggml_backend_sycl_device_get_description(dev);
+    props->id          = ctx->id.c_str();
+    props->type        = ggml_backend_sycl_device_get_type(dev);
+    ggml_backend_sycl_device_get_memory(dev, &props->memory_free, &props->memory_total);
+
+    bool host_buffer = getenv("GGML_SYCL_NO_PINNED") == nullptr;
+#ifdef GGML_SYCL_NO_PEER_COPY
+    bool events = false;
+#else
+    bool events = true;
+#endif
+
+    props->caps = {
+        /* .async                 = */ true,
+        /* .host_buffer           = */ host_buffer,
+        /* .buffer_from_host_ptr  = */ false,
+        /* .events                = */ events,
+    };
+
+    props->integrated = ctx->integrated;
+    props->library = GGML_SYCL_NAME;
+}
+'@ `
+            -Description "SYCL device properties"
+
+        $syclContent = Replace-RequiredContent `
+            -Content $syclContent `
+            -OldValue @'
+            for (int i = 0; i < ggml_sycl_info().device_count; i++) {
+                ggml_backend_sycl_device_context * dev_ctx = new ggml_backend_sycl_device_context;
+                dev_ctx->device = i;
+                dev_ctx->name = GGML_SYCL_NAME + std::to_string(i);
+
+                ggml_sycl_set_device(i);
+
+                dpct::device_info prop;
+                SYCL_CHECK(CHECK_TRY_ERROR(dpct::get_device_info(
+                    prop, dpct::dev_mgr::instance().get_device(i))));
+
+                dev_ctx->description = prop.get_name();
+
+                ggml_backend_dev_t dev = new ggml_backend_device {
+'@ `
+            -NewValue @'
+            for (int i = 0; i < ggml_sycl_info().device_count; i++) {
+                ggml_backend_sycl_device_context * dev_ctx = new ggml_backend_sycl_device_context;
+                dev_ctx->device = i;
+                dev_ctx->name = GGML_SYCL_NAME + std::to_string(i);
+                dev_ctx->id = dev_ctx->name;
+
+                ggml_sycl_set_device(i);
+
+                dpct::device_info prop;
+                SYCL_CHECK(CHECK_TRY_ERROR(dpct::get_device_info(
+                    prop, dpct::dev_mgr::instance().get_device(i))));
+
+                dev_ctx->description = prop.get_name();
+                dev_ctx->integrated = prop.get_integrated() != 0 || prop.get_host_unified_memory();
+                if (prop.get_device_id() != 0) {
+                    char device_id[16];
+                    snprintf(device_id, sizeof(device_id), "%x", prop.get_device_id());
+                    dev_ctx->dxgi_device_id = device_id;
+                }
+
+                ggml_backend_dev_t dev = new ggml_backend_device {
+'@ `
+            -Description "SYCL device registration metadata"
+
+        Set-Content -LiteralPath $syclFile -Value $syclContent -NoNewline
+    }
+}
+
+function Patch-WindowsSharedGgmlBaseName {
+    param([string]$OllamaRoot)
+
+    $cmakePath = Join-Path $OllamaRoot "ml\backend\ggml\ggml\src\CMakeLists.txt"
+    $cmakeContent = Get-Content -LiteralPath $cmakePath -Raw
+
+    if ($cmakeContent -notmatch 'if \(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM"\)\s+set_target_properties\(ggml-base PROPERTIES PREFIX "lib"\)') {
+        $cmakeContent = Replace-RequiredContent `
+            -Content $cmakeContent `
+            -OldValue @'
+set_target_properties(ggml-base PROPERTIES
+    VERSION ${GGML_VERSION}
+    SOVERSION ${GGML_VERSION_MAJOR}
+)
+'@ `
+            -NewValue @'
+set_target_properties(ggml-base PROPERTIES
+    VERSION ${GGML_VERSION}
+    SOVERSION ${GGML_VERSION_MAJOR}
+)
+
+if (WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+    set_target_properties(ggml-base PROPERTIES PREFIX "lib")
+endif()
+'@ `
+            -Description "IntelLLVM Windows ggml-base prefix"
+
+        Set-Content -LiteralPath $cmakePath -Value $cmakeContent -NoNewline
+    }
+}
+
 function Normalize-GgmlDllNames {
     param([string]$Directory)
 
@@ -355,7 +938,9 @@ function Normalize-GgmlDllNames {
         return
     }
 
-    Get-ChildItem -LiteralPath $Directory -Filter "libggml-*.dll" | ForEach-Object {
+    Get-ChildItem -LiteralPath $Directory -Filter "libggml-*.dll" |
+        Where-Object { $_.Name -ne "libggml-base.dll" } |
+        ForEach-Object {
         $target = Join-Path $_.DirectoryName $_.Name.Substring(3)
         if (Test-Path -LiteralPath $target) {
             Remove-Item -LiteralPath $target -Force
@@ -364,17 +949,17 @@ function Normalize-GgmlDllNames {
     }
 }
 
-function Ensure-GgmlBaseAlias {
+function Ensure-GgmlBaseDiscoveryCopy {
     param([string]$Directory)
 
-    $baseDll = Join-Path $Directory "ggml-base.dll"
-    $aliasDll = Join-Path $Directory "libggml-base.dll"
+    $baseDll = Join-Path $Directory "libggml-base.dll"
+    $discoveryDll = Join-Path $Directory "ggml-base.dll"
 
     if (-not (Test-Path -LiteralPath $baseDll)) {
         return
     }
 
-    Copy-Item -LiteralPath $baseDll -Destination $aliasDll -Force
+    Copy-Item -LiteralPath $baseDll -Destination $discoveryDll -Force
 }
 
 function Copy-LlvmMingwRuntimeDependencies {
@@ -404,13 +989,18 @@ function Copy-OneApiRuntimeDependencies {
     $candidates = @(
         "sycl8.dll",
         "sycl-jit.dll",
+        "ur_loader.dll",
+        "ur_adapter_opencl.dll",
+        "ur_win_proxy_loader.dll",
         "ur_adapter_level_zero.dll",
+        "ur_adapter_level_zero_v2.dll",
         "libiomp5md.dll",
         "libmmd.dll",
         "svml_dispmd.dll",
         "mkl_sycl_blas.5.dll",
         "mkl_core.2.dll",
         "mkl_intel_thread.2.dll",
+        "mkl_tbb_thread.2.dll",
         "tbb12.dll",
         "tbbmalloc.dll",
         "tbbmalloc_proxy.dll"
@@ -442,6 +1032,22 @@ function Copy-OneApiRuntimeDependencies {
     }
 }
 
+function Copy-SyclRootRuntimeDependencies {
+    param(
+        [string]$SourceDirectory,
+        [string]$DestinationDirectory
+    )
+
+    foreach ($dll in @("libmmd.dll", "svml_dispmd.dll")) {
+        $source = Join-Path $SourceDirectory $dll
+        if (Test-Path -LiteralPath $source) {
+            Copy-Item -LiteralPath $source -Destination (Join-Path $DestinationDirectory $dll) -Force
+        } else {
+            Write-Warning "Unable to locate SYCL root runtime '$dll'."
+        }
+    }
+}
+
 function Build-CpuDependencies {
     param(
         [string]$OllamaSourceRoot,
@@ -463,7 +1069,7 @@ function Build-CpuDependencies {
 
     $cpuOutDir = Join-Path $InstallPrefix "lib\ollama"
     Normalize-GgmlDllNames $cpuOutDir
-    Ensure-GgmlBaseAlias $cpuOutDir
+    Ensure-GgmlBaseDiscoveryCopy $cpuOutDir
     Copy-LlvmMingwRuntimeDependencies $cpuOutDir $LlvmBin
 }
 
@@ -524,8 +1130,61 @@ function Build-SyclBackend {
         throw "ggml-sycl.dll was not produced."
     }
 
+    $rootOutDir = Join-Path $InstallPrefix "lib\ollama"
+    New-Item -ItemType Directory -Path $rootOutDir -Force | Out-Null
+
+    foreach ($baseName in @("ggml-base.dll", "libggml-base.dll")) {
+        $baseSource = Join-Path $buildDir "lib\ollama\$baseName"
+        if (Test-Path -LiteralPath $baseSource) {
+            Copy-Item -LiteralPath $baseSource -Destination (Join-Path $rootOutDir $baseName) -Force
+        }
+    }
+
+    Normalize-GgmlDllNames $rootOutDir
+    Ensure-GgmlBaseDiscoveryCopy $rootOutDir
+
     Copy-Item -LiteralPath $builtDll -Destination (Join-Path $syclOutDir "ggml-sycl.dll") -Force
     Copy-OneApiRuntimeDependencies $syclOutDir
+    Copy-SyclRootRuntimeDependencies -SourceDirectory $syclOutDir -DestinationDirectory $rootOutDir
+}
+
+function Write-WindowsLaunchScripts {
+    param([string]$InstallPrefix)
+
+    $serveScript = @'
+@echo off
+setlocal
+
+@REM Prefer bundled runtimes and avoid inheriting stale Intel device filters.
+set "PATH=%~dp0;%~dp0lib\ollama;%~dp0lib\ollama\sycl;%PATH%"
+
+set "OLLAMA_NUM_GPU=999"
+set "OLLAMA_KEEP_ALIVE=-1"
+set "OLLAMA_HOST=127.0.0.1:11434"
+set "NO_PROXY=localhost,127.0.0.1"
+set "no_proxy=localhost,127.0.0.1"
+set "ZES_ENABLE_SYSMAN=1"
+set "GIN_MODE=release"
+
+@REM Newer Ollama discovery relies on /info from a child runner. On some
+@REM Windows Intel iGPU systems a stale selector like ONEAPI_DEVICE_SELECTOR=level_zero:0
+@REM prevents SYCL discovery entirely. The portable wrapper clears those filters.
+set "ONEAPI_DEVICE_SELECTOR="
+set "SYCL_DEVICE_FILTER="
+set "ZE_AFFINITY_MASK="
+
+cd /d %~dp0
+ollama.exe serve
+'@
+
+    $startScript = @'
+@echo off
+
+start "Ollama Serve" cmd /k "cd /d %~dp0 && call ollama-serve.bat"
+'@
+
+    Set-Content -LiteralPath (Join-Path $InstallPrefix "ollama-serve.bat") -Value $serveScript -NoNewline
+    Set-Content -LiteralPath (Join-Path $InstallPrefix "start-ollama.bat") -Value $startScript -NoNewline
 }
 
 function Write-BuildMetadata {
@@ -590,6 +1249,8 @@ $llamaSourceRoot = Expand-Zipball -ArchivePath $llamaZip -DestinationDirectory (
 Write-Step "Overlaying ggml-sycl from pinned llama.cpp"
 $syclSourceDir = Overlay-SyclSources -LlamaRoot $llamaSourceRoot -OllamaRoot $ollamaSourceRoot
 Patch-SyclCompatibility -SyclDir $syclSourceDir
+Patch-WindowsSyclIntegratedGpuSupport -OllamaRoot $ollamaSourceRoot -SyclDir $syclSourceDir
+Patch-WindowsSharedGgmlBaseName -OllamaRoot $ollamaSourceRoot
 
 $vsDevCmd = Resolve-VsDevCmd
 $oneApiSetvars = Resolve-OneApiSetvars
@@ -608,6 +1269,8 @@ if (-not $SkipGoBuild) {
 if (-not $SkipSyclBuild) {
     Build-SyclBackend -OllamaSourceRoot $ollamaSourceRoot -InstallPrefix $OutputDir -OneApiSetvars $oneApiSetvars
 }
+
+Write-WindowsLaunchScripts -InstallPrefix $OutputDir
 
 Write-BuildMetadata `
     -InstallPrefix $OutputDir `

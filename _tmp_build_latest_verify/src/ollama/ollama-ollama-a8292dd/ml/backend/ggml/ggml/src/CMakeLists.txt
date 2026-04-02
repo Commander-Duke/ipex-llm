@@ -215,6 +215,10 @@ set_target_properties(ggml-base PROPERTIES
     SOVERSION ${GGML_VERSION_MAJOR}
 )
 
+if (WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+    set_target_properties(ggml-base PROPERTIES PREFIX "lib")
+endif()
+
 target_include_directories(ggml-base PRIVATE .)
 if (GGML_BACKEND_DL)
     target_compile_definitions(ggml-base PUBLIC GGML_BACKEND_DL)

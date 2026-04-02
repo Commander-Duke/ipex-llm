@@ -11,6 +11,8 @@
 #include <windows.h>
 #include <pdh.h>
 #include <dxgi1_2.h>
+#include <algorithm>
+#include <cctype>
 #include <sstream>
 #include <thread>
 #include <filesystem>
@@ -25,6 +27,7 @@ Struct to keep track of GPU adapter information at runtime
 */
 struct GpuInfo {
     std::wstring description; // debug field
+    std::string deviceId;
     LUID luid;
     std::wstring pdhInstance;
     double dedicatedTotal = 0.0;
@@ -70,6 +73,69 @@ static inline double b_to_gb(T n)
     return (double(n) / (1024.0 * 1024 * 1024));
 }
 
+static std::string normalize_device_id(std::string value) {
+    value.erase(std::remove_if(value.begin(), value.end(), [](unsigned char ch) {
+        return std::isspace(ch) != 0;
+    }), value.end());
+
+    if (value.rfind("0x", 0) == 0 || value.rfind("0X", 0) == 0) {
+        value = value.substr(2);
+    }
+
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return (char) std::tolower(ch);
+    });
+
+    size_t first_non_zero = value.find_first_not_of('0');
+    if (first_non_zero == std::string::npos) {
+        return value.empty() ? std::string() : "0";
+    }
+
+    return value.substr(first_non_zero);
+}
+
+static std::string normalize_description(std::string value) {
+    auto is_space = [](unsigned char ch) {
+        return std::isspace(ch) != 0;
+    };
+
+    while (!value.empty() && is_space((unsigned char) value.front())) {
+        value.erase(value.begin());
+    }
+
+    while (!value.empty() && is_space((unsigned char) value.back())) {
+        value.pop_back();
+    }
+
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return (char) std::tolower(ch);
+    });
+
+    return value;
+}
+
+static std::string format_device_id(UINT device_id) {
+    char buffer[16];
+    snprintf(buffer, sizeof(buffer), "%x", device_id);
+    return normalize_device_id(buffer);
+}
+
+static std::string utf8_from_wstring(const std::wstring & value) {
+    if (value.empty()) {
+        return {};
+    }
+
+    int size = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (size <= 1) {
+        return {};
+    }
+
+    std::string result(size, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, result.data(), size, nullptr, nullptr);
+    result.pop_back();
+    return result;
+}
+
 /*
 Fetch the GPU adapter 'dedicated memory' and 'shared memory' using DXGI
 */
@@ -101,6 +167,7 @@ static std::vector<GpuInfo> get_dxgi_gpu_infos() {
             GpuInfo info;
             fetch_dxgi_adapter_desc1(desc, &info);
             info.description = std::wstring(desc.Description);
+            info.deviceId = format_device_id(desc.DeviceId);
             info.luid = desc.AdapterLuid;
             info.pdhInstance = generate_pdh_instance_name_from_luid(desc.AdapterLuid);
             infos.push_back(info);
@@ -153,6 +220,81 @@ static bool get_gpu_memory_usage(GpuInfo& gpu) {
 
     dll_functions.PdhCloseQuery(query);
     return true;
+}
+
+static GpuInfo * find_gpu_by_luid(std::vector<GpuInfo> & gpus, const char * luid) {
+    if (luid == nullptr || *luid == '\0') {
+        return nullptr;
+    }
+
+    for (auto & gpu : gpus) {
+        char luid_buffer[32];
+        snprintf(luid_buffer, sizeof(luid_buffer), "0x%08x%08x", gpu.luid.HighPart, gpu.luid.LowPart);
+        if (std::string(luid_buffer) == std::string(luid)) {
+            return &gpu;
+        }
+    }
+
+    return nullptr;
+}
+
+static GpuInfo * find_gpu_by_adapter(std::vector<GpuInfo> & gpus, const char * device_id, const char * description) {
+    std::string normalized_device_id = device_id != nullptr ? normalize_device_id(device_id) : std::string();
+    std::string normalized_description = description != nullptr ? normalize_description(description) : std::string();
+
+    GpuInfo * device_id_match = nullptr;
+    GpuInfo * description_match = nullptr;
+
+    for (auto & gpu : gpus) {
+        bool matches_device_id = !normalized_device_id.empty() && gpu.deviceId == normalized_device_id;
+
+        std::string gpu_description = normalize_description(utf8_from_wstring(gpu.description));
+        bool matches_description = !normalized_description.empty() &&
+            (gpu_description == normalized_description ||
+             gpu_description.find(normalized_description) != std::string::npos ||
+             normalized_description.find(gpu_description) != std::string::npos);
+
+        if (matches_device_id && matches_description) {
+            return &gpu;
+        }
+
+        if (matches_device_id && device_id_match == nullptr) {
+            device_id_match = &gpu;
+        }
+
+        if (matches_description && description_match == nullptr) {
+            description_match = &gpu;
+        }
+    }
+
+    return device_id_match != nullptr ? device_id_match : description_match;
+}
+
+static int ggml_dxgi_pdh_get_gpu_memory(GpuInfo * targetGpu, const char * identifier, size_t * free, size_t * total, bool is_integrated_gpu) {
+    if (targetGpu == nullptr) {
+        return ERROR_NOT_FOUND;
+    }
+
+    int status = get_gpu_memory_usage(*targetGpu);
+    if (!status) {
+        GGML_LOG_ERROR("Failed to get GPU memory usage.\n");
+        return ERROR_DEVICE_NOT_AVAILABLE;
+    }
+
+    if (is_integrated_gpu) {
+        GGML_LOG_DEBUG("Integrated GPU (%ls) with adapter %s detected. Shared Total: %.2f bytes (%.2f GB), Shared Usage: %.2f bytes (%.2f GB), Dedicated Total: %.2f bytes (%.2f GB), Dedicated Usage: %.2f bytes (%.2f GB)\n",
+            targetGpu->description.c_str(), identifier, targetGpu->sharedTotal, b_to_gb(targetGpu->sharedTotal), targetGpu->sharedUsage, b_to_gb(targetGpu->sharedUsage),
+            targetGpu->dedicatedTotal, b_to_gb(targetGpu->dedicatedTotal), targetGpu->dedicatedUsage, b_to_gb(targetGpu->dedicatedUsage));
+        *free = (targetGpu->sharedTotal - targetGpu->sharedUsage) + (targetGpu->dedicatedTotal - targetGpu->dedicatedUsage);
+        *total = targetGpu->sharedTotal + targetGpu->dedicatedTotal;
+    } else {
+        GGML_LOG_DEBUG("Discrete GPU (%ls) with adapter %s detected. Dedicated Total: %.2f bytes (%.2f GB), Dedicated Usage: %.2f bytes (%.2f GB)\n",
+            targetGpu->description.c_str(), identifier, targetGpu->dedicatedTotal, b_to_gb(targetGpu->dedicatedTotal), targetGpu->dedicatedUsage, b_to_gb(targetGpu->dedicatedUsage));
+        *free = targetGpu->dedicatedTotal - targetGpu->dedicatedUsage;
+        *total = targetGpu->dedicatedTotal;
+    }
+
+    return ERROR_SUCCESS;
 }
 
 
@@ -235,46 +377,30 @@ extern "C" {
 
         std::lock_guard<std::mutex> lock(ggml_dxgi_pdh_lock);
 
-        // Enumerate GPUs using DXGI and find the matching LUID
-        // This also fetches the total memory info for each of the enumerated GPUs
         std::vector<GpuInfo> gpus = get_dxgi_gpu_infos();
-        GpuInfo *targetGpu = nullptr;
-        for (auto& gpu : gpus) {
-            char luid_buffer[32]; // "0x" + 16 hex digits + null terminator
-            snprintf(luid_buffer, sizeof(luid_buffer), "0x%08x%08x", gpu.luid.HighPart, gpu.luid.LowPart);
-            std::string gpu_luid_str(luid_buffer);
-            if (gpu_luid_str == std::string(luid)) {
-                targetGpu = &gpu;
-                break;
-            }
-        }
+        GpuInfo *targetGpu = find_gpu_by_luid(gpus, luid);
         if (!targetGpu) {
             GGML_LOG_ERROR("GPU with LUID %s not found.\n", luid);
             return ERROR_NOT_FOUND;
         }
 
-        // Get the current memory usage for the target GPU
-        int status = get_gpu_memory_usage(*targetGpu);
-        if (!status) {
-            GGML_LOG_ERROR("Failed to get GPU memory usage.\n");
-            return ERROR_DEVICE_NOT_AVAILABLE;
+        return ggml_dxgi_pdh_get_gpu_memory(targetGpu, luid, free, total, is_integrated_gpu);
+    }
+
+    int ggml_dxgi_pdh_get_device_memory_by_adapter(const char * device_id, const char * description, size_t * free, size_t * total, bool is_integrated_gpu) {
+        std::lock_guard<std::mutex> lock(ggml_dxgi_pdh_lock);
+
+        std::vector<GpuInfo> gpus = get_dxgi_gpu_infos();
+        GpuInfo * targetGpu = find_gpu_by_adapter(gpus, device_id, description);
+        if (!targetGpu) {
+            GGML_LOG_ERROR("GPU with device ID %s and description %s not found.\n",
+                device_id != nullptr ? device_id : "<null>",
+                description != nullptr ? description : "<null>");
+            return ERROR_NOT_FOUND;
         }
 
-        // Calculate the free memory based on whether it's an integrated or discrete GPU
-        if (is_integrated_gpu) {
-            // IGPU free = SharedTotal - SharedUsage
-            GGML_LOG_DEBUG("Integrated GPU (%ls) with LUID %s detected. Shared Total: %.2f bytes (%.2f GB), Shared Usage: %.2f bytes (%.2f GB), Dedicated Total: %.2f bytes (%.2f GB), Dedicated Usage: %.2f bytes (%.2f GB)\n", targetGpu->description.c_str(), luid, targetGpu->sharedTotal, b_to_gb(targetGpu->sharedTotal), targetGpu->sharedUsage, b_to_gb(targetGpu->sharedUsage), targetGpu->dedicatedTotal, b_to_gb(targetGpu->dedicatedTotal), targetGpu->dedicatedUsage, b_to_gb(targetGpu->dedicatedUsage));
-            *free = (targetGpu->sharedTotal - targetGpu->sharedUsage) + (targetGpu->dedicatedTotal - targetGpu->dedicatedUsage); // Some IGPUs also have dedicated memory, which can be used along with the IGPU's shared memory
-            *total = targetGpu->sharedTotal + targetGpu->dedicatedTotal;
-        }
-        else {
-            // DGPU free = DedicatedTotal - DedicatedUsage
-            GGML_LOG_DEBUG("Discrete GPU (%ls) with LUID %s detected. Dedicated Total: %.2f bytes (%.2f GB), Dedicated Usage: %.2f bytes (%.2f GB)\n", targetGpu->description.c_str(), luid, targetGpu->dedicatedTotal, b_to_gb(targetGpu->dedicatedTotal), targetGpu->dedicatedUsage, b_to_gb(targetGpu->dedicatedUsage));
-            *free = targetGpu->dedicatedTotal - targetGpu->dedicatedUsage;
-            *total = targetGpu->dedicatedTotal;
-        }
-
-        return ERROR_SUCCESS;
+        const char * identifier = device_id != nullptr && *device_id != '\0' ? device_id : description;
+        return ggml_dxgi_pdh_get_gpu_memory(targetGpu, identifier != nullptr ? identifier : "<unknown>", free, total, is_integrated_gpu);
     }
 
 } // extern "C"
@@ -289,6 +415,9 @@ extern "C" {
     }
     void ggml_dxgi_pdh_release() {}
     int ggml_dxgi_pdh_get_device_memory(const char* luid, size_t *free, size_t *total, bool is_integrated_gpu) {
+        return -1;
+    }
+    int ggml_dxgi_pdh_get_device_memory_by_adapter(const char * device_id, const char * description, size_t * free, size_t * total, bool is_integrated_gpu) {
         return -1;
     }
 

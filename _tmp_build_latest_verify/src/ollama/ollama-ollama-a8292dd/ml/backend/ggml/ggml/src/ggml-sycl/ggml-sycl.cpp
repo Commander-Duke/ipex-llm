@@ -64,9 +64,13 @@ int g_ggml_sycl_prioritize_dmmv = 0;
 int g_ggml_sycl_use_async_mem_op = 0;
 
 static ggml_sycl_device_info ggml_sycl_init() {
+    std::fprintf(stderr, "[sycl-reg] ggml_sycl_init enter\n");
+    std::fflush(stderr);
     ggml_sycl_device_info info = {};
 
     info.device_count = dpct::dev_mgr::instance().device_count();
+    std::fprintf(stderr, "[sycl-reg] device_count=%d\n", info.device_count);
+    std::fflush(stderr);
     if (info.device_count == 0) {
         GGML_LOG_ERROR("%s: failed to initialize: %s\n", GGML_SYCL_NAME, __func__);
         return info;
@@ -82,12 +86,16 @@ static ggml_sycl_device_info ggml_sycl_init() {
 //     GGML_LOG_INFO("%s: SYCL_USE_XMX: no\n", __func__);
 // #endif
     for (int i = 0; i < info.device_count; ++i) {
+        std::fprintf(stderr, "[sycl-reg] init device %d\n", i);
+        std::fflush(stderr);
         info.devices[i].vmm = 0;
         dpct::device_info prop;
         sycl::device device = dpct::dev_mgr::instance().get_device(i);
 
         SYCL_CHECK(CHECK_TRY_ERROR(dpct::get_device_info(
             prop, device)));
+        std::fprintf(stderr, "[sycl-reg] device %d name=%s\n", i, prop.get_name());
+        std::fflush(stderr);
 
         info.default_tensor_split[i] = total_vram;
         total_vram += prop.get_global_mem_size();
@@ -4286,8 +4294,11 @@ int ggml_backend_sycl_get_device_count() {
 
 struct ggml_backend_sycl_device_context {
     int device;
+    bool integrated;
     std::string name;
+    std::string id;
     std::string description;
+    std::string dxgi_device_id;
 };
 
 static const char * ggml_backend_sycl_device_get_name(ggml_backend_dev_t dev) {
@@ -4303,18 +4314,36 @@ static const char * ggml_backend_sycl_device_get_description(ggml_backend_dev_t 
 static void ggml_backend_sycl_device_get_memory(ggml_backend_dev_t dev, size_t * free, size_t * total) {
     ggml_backend_sycl_device_context * ctx = (ggml_backend_sycl_device_context *)dev->context;
     ggml_sycl_set_device(ctx->device);
+
+#ifdef _WIN32
+    if (ctx->integrated && ggml_dxgi_pdh_init() == 0) {
+        int status = ggml_dxgi_pdh_get_device_memory_by_adapter(
+            ctx->dxgi_device_id.empty() ? nullptr : ctx->dxgi_device_id.c_str(),
+            ctx->description.empty() ? nullptr : ctx->description.c_str(),
+            free,
+            total,
+            true);
+        ggml_dxgi_pdh_release();
+        if (status == 0) {
+            return;
+        }
+    }
+#endif
+
     SYCL_CHECK(CHECK_TRY_ERROR(
     dpct::dev_mgr::instance().get_device(ctx->device).get_memory_info(*free, *total)));
 }
 
 static enum ggml_backend_dev_type ggml_backend_sycl_device_get_type(ggml_backend_dev_t dev) {
-    GGML_UNUSED(dev);
-    return GGML_BACKEND_DEVICE_TYPE_GPU;
+    ggml_backend_sycl_device_context * ctx = (ggml_backend_sycl_device_context *)dev->context;
+    return ctx->integrated ? GGML_BACKEND_DEVICE_TYPE_IGPU : GGML_BACKEND_DEVICE_TYPE_GPU;
 }
 
 static void ggml_backend_sycl_device_get_props(ggml_backend_dev_t dev, ggml_backend_dev_props * props) {
+    ggml_backend_sycl_device_context * ctx = (ggml_backend_sycl_device_context *)dev->context;
     props->name        = ggml_backend_sycl_device_get_name(dev);
     props->description = ggml_backend_sycl_device_get_description(dev);
+    props->id          = ctx->id.c_str();
     props->type        = ggml_backend_sycl_device_get_type(dev);
     ggml_backend_sycl_device_get_memory(dev, &props->memory_free, &props->memory_total);
 
@@ -4331,6 +4360,9 @@ static void ggml_backend_sycl_device_get_props(ggml_backend_dev_t dev, ggml_back
         /* .buffer_from_host_ptr  = */ false,
         /* .events                = */ events,
     };
+
+    props->integrated = ctx->integrated;
+    props->library = GGML_SYCL_NAME;
 }
 
 static ggml_backend_t ggml_backend_sycl_device_init(ggml_backend_dev_t dev, const char * params) {
@@ -4793,6 +4825,8 @@ static const ggml_backend_reg_i ggml_backend_sycl_reg_interface = {
 // backend registry
 
 ggml_backend_reg_t ggml_backend_sycl_reg() {
+    std::fprintf(stderr, "[sycl-reg] ggml_backend_sycl_reg enter\n");
+    std::fflush(stderr);
     static ggml_backend_reg reg;
     static bool initialized = false;
 
@@ -4800,20 +4834,37 @@ ggml_backend_reg_t ggml_backend_sycl_reg() {
         static std::mutex mutex;
         std::lock_guard<std::mutex> lock(mutex);
         if (!initialized) {
+            std::fprintf(stderr, "[sycl-reg] initialize registry\n");
+            std::fflush(stderr);
             ggml_backend_sycl_reg_context * ctx = new ggml_backend_sycl_reg_context;
 
             for (int i = 0; i < ggml_sycl_info().device_count; i++) {
+                std::fprintf(stderr, "[sycl-reg] registry device loop %d\n", i);
+                std::fflush(stderr);
                 ggml_backend_sycl_device_context * dev_ctx = new ggml_backend_sycl_device_context;
                 dev_ctx->device = i;
                 dev_ctx->name = GGML_SYCL_NAME + std::to_string(i);
+                dev_ctx->id = dev_ctx->name;
 
+                std::fprintf(stderr, "[sycl-reg] set device %d\n", i);
+                std::fflush(stderr);
                 ggml_sycl_set_device(i);
 
                 dpct::device_info prop;
+                std::fprintf(stderr, "[sycl-reg] get device info %d\n", i);
+                std::fflush(stderr);
                 SYCL_CHECK(CHECK_TRY_ERROR(dpct::get_device_info(
                     prop, dpct::dev_mgr::instance().get_device(i))));
+                std::fprintf(stderr, "[sycl-reg] got device info %d name=%s\n", i, prop.get_name());
+                std::fflush(stderr);
 
                 dev_ctx->description = prop.get_name();
+                dev_ctx->integrated = prop.get_integrated() != 0 || prop.get_host_unified_memory();
+                if (prop.get_device_id() != 0) {
+                    char device_id[16];
+                    snprintf(device_id, sizeof(device_id), "%x", prop.get_device_id());
+                    dev_ctx->dxgi_device_id = device_id;
+                }
 
                 ggml_backend_dev_t dev = new ggml_backend_device {
                     /* .iface       = */ ggml_backend_sycl_device_interface,
@@ -4821,6 +4872,8 @@ ggml_backend_reg_t ggml_backend_sycl_reg() {
                     /* .context     = */ dev_ctx
                 };
                 ctx->devices.push_back(dev);
+                std::fprintf(stderr, "[sycl-reg] registered device %d\n", i);
+                std::fflush(stderr);
             }
 
             reg = ggml_backend_reg {
@@ -4828,6 +4881,8 @@ ggml_backend_reg_t ggml_backend_sycl_reg() {
                 /* .iface       = */ ggml_backend_sycl_reg_interface,
                 /* .context     = */ ctx
             };
+            std::fprintf(stderr, "[sycl-reg] registry ready\n");
+            std::fflush(stderr);
         }
 
         initialized = true;

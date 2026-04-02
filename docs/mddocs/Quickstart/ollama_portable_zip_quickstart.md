@@ -187,6 +187,9 @@ To specify which Intel GPU(s) you would like Ollama to use, you could set enviro
   - In the "Command Prompt", set `ONEAPI_DEVICE_SELECTOR` to define the Intel GPU(s) you want to use, e.g. `set ONEAPI_DEVICE_SELECTOR=level_zero:0` (on single Intel GPU), or `set ONEAPI_DEVICE_SELECTOR=level_zero:0;level_zero:1` (on multiple Intel GPUs), in which `0`, `1` should be changed to your desired GPU id
   - Start Ollama serve through `start-ollama.bat`
 
+> [!NOTE]
+> On recent Windows Ollama/IPEX builds, Intel iGPU discovery may use the OpenCL SYCL backend by default. In that case, forcing `ONEAPI_DEVICE_SELECTOR=level_zero:*` can prevent GPU discovery and make Ollama fall back to CPU. If you are running on a single Intel iGPU or just want automatic detection, leave `ONEAPI_DEVICE_SELECTOR` unset and use the packaged `start-ollama.bat` / `ollama-serve.bat`.
+
 - For **Linux** users:
 
   - In a terminal, navigate to the extracted folder by `cd PATH\TO\EXTRACTED\FOLDER`

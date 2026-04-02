@@ -686,6 +686,7 @@ GGML_API int ggml_hip_get_device_memory(const char *id, size_t *free, size_t *to
 GGML_API void ggml_hip_mgmt_release();
 GGML_API int ggml_dxgi_pdh_init();
 GGML_API int ggml_dxgi_pdh_get_device_memory(const char* luid, size_t *free, size_t *total, bool is_integrated_gpu);
+GGML_API int ggml_dxgi_pdh_get_device_memory_by_adapter(const char * device_id, const char * description, size_t * free, size_t * total, bool is_integrated_gpu);
 GGML_API void ggml_dxgi_pdh_release();
 
 #ifdef __cplusplus
