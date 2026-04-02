@@ -383,7 +383,8 @@ def setup_package():
         scripts={
             'Linux': ['src/ipex_llm/cli/llm-cli', 'src/ipex_llm/cli/llm-chat', 'scripts/ipex-llm-init'],
             'Windows': ['src/ipex_llm/cli/llm-cli.ps1', 'src/ipex_llm/cli/llm-chat.ps1',
-                        'scripts/ipex-llm-init.bat', 'scripts/init-ollama.bat'],
+                        'scripts/ipex-llm-init.bat', 'scripts/init-ollama.bat',
+                        'scripts/build-ollama-ipex-latest.bat', 'scripts/build-ollama-ipex-latest.ps1'],
         }[platform_name],
         platforms=['windows']
     )

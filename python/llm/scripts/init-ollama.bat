@@ -14,7 +14,7 @@ for %%a in ("%CPP_FILE%") do set "CPP_DIR=%%~dpa"
 set "CPP_DIR=%CPP_DIR:~0,-1%"
 
 set "SOURCE_DIR=%CPP_DIR%\libs\ollama"
-set "LAYOUT=new"
+set "LAYOUT=package"
 if not exist "%SOURCE_DIR%\ollama.exe" (
     set "SOURCE_DIR=%CPP_DIR%\libs"
     set "LAYOUT=legacy"
@@ -25,10 +25,17 @@ if not exist "%SOURCE_DIR%\ollama.exe" (
     exit /b 1
 )
 
+if exist "%SOURCE_DIR%\lib\ollama" (
+    set "LAYOUT=upstream"
+)
+
 echo Initializing Ollama from "%SOURCE_DIR%"
 echo Init mode: %MODE%
 
-if /I "%LAYOUT%"=="new" (
+if /I "%LAYOUT%"=="upstream" (
+    call :install_file "ollama.exe" || exit /b 1
+    call :install_dir "lib" || exit /b 1
+) else if /I "%LAYOUT%"=="package" (
     for %%f in (ollama.exe ollama-lib.exe llama.dll ggml.dll llava_shared.dll ggml-base.dll ggml-cpu.dll ggml-sycl.dll mtmd_shared.dll libc++.dll) do (
         call :install_file "%%f" || exit /b 1
     )

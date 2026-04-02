@@ -257,3 +257,35 @@ Hyper-V Requirements:      A hypervisor has been detected. Features required for
 |           | PCI BDF Address: 0000:03:00.0                                                        |
 +-----------+--------------------------------------------------------------------------------------+
 ``` 
+
+## Build Latest Ollama on Windows
+
+The Windows scripts [build-ollama-ipex-latest.ps1](./build-ollama-ipex-latest.ps1) and [build-ollama-ipex-latest.bat](./build-ollama-ipex-latest.bat) build an upstream-based `ollama` package with an Intel SYCL backend.
+
+Each run does the following:
+
+* Pulls the latest Ollama source from the upstream default branch, unless `-OllamaRef` is provided.
+* Reads Ollama's `Makefile.sync` and downloads the exact pinned `llama.cpp` snapshot.
+* Overlays `ggml-sycl` from that pinned `llama.cpp` tree.
+* Builds the Windows CPU backends with `llvm-mingw` clang, builds `ollama.exe`, and then builds `ggml-sycl.dll` with oneAPI.
+
+Requirements:
+
+* Windows
+* Intel oneAPI installed
+* Visual Studio C++ build tools installed
+* `cmake` and `ninja` available in `PATH`
+
+Usage:
+
+```powershell
+build-ollama-ipex-latest.bat
+```
+
+To pin a specific upstream ref:
+
+```powershell
+build-ollama-ipex-latest.bat -OllamaRef v0.19.0
+```
+
+By default the output is written to `_build\ollama-ipex-latest\dist\windows-amd64` under the repo root. The output layout follows the current upstream Ollama Windows layout, so the compiled binary is `ollama.exe` and the runtime libraries are placed under `lib\ollama\...`.

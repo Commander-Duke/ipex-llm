@@ -54,3 +54,27 @@ dist
 # For readthedocs
 docs/readthedocs/requirements-doc.txt
 docs/readthedocs/_build/*
+_tmp_build_latest_verify/downloads/go1.24.1.windows-amd64.zip
+_tmp_build_latest_verify/downloads/llama-ec98e2002.zip
+_tmp_build_latest_verify/downloads/llvm-mingw-20240619-ucrt-x86_64.zip
+_tmp_build_latest_verify/downloads/ollama-a8292dd85f23.zip
+_tmp_ollama_main.zip
+_tools/llvm-mingw-ucrt.zip
+_tmp_llama_sync_base.zip
+_tools/go/lib/time/zoneinfo.zip
+_tools/go/lib/fips140/v1.26.0.zip
+_tools/go1.26.1.windows-amd64.zip
+_tools/go/lib/fips140/v1.0.0-c2097c7c.zip
+_tools/go/src/archive/zip/testdata/dd.zip
+_tools/go/src/archive/zip/testdata/test.zip
+_tools/go/src/archive/zip/testdata/unix.zip
+_tools/go/src/html/template/testdata/fs.zip
+_tools/go/src/archive/zip/testdata/winxp.zip
+_tools/go/src/archive/zip/testdata/zip64.zip
+_tools/go/src/archive/zip/testdata/dupdir.zip
+_tools/go/src/archive/zip/testdata/readme.zip
+_tools/go/src/archive/zip/testdata/subdir.zip
+_tools/go/src/archive/zip/testdata/symlink.zip
+_tools/go/src/archive/zip/testdata/time-go.zip
+_tools/go/src/archive/zip/testdata/zip64-2.zip
+*.zip
