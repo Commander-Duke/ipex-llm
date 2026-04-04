@@ -1,0 +1,10 @@
+{
+	"InstallScripts" : 
+	[
+		"C:/Users/Administrator/Documents/GitHub/ipex-llm/_build/ollama-ipex-latest/src/ollama/ollama-ollama-4589fa2/build-sycl/cmake_install.cmake",
+		"C:/Users/Administrator/Documents/GitHub/ipex-llm/_build/ollama-ipex-latest/src/ollama/ollama-ollama-4589fa2/build-sycl/ml/backend/ggml/ggml/src/cmake_install.cmake",
+		"C:/Users/Administrator/Documents/GitHub/ipex-llm/_build/ollama-ipex-latest/src/ollama/ollama-ollama-4589fa2/build-sycl/ml/backend/ggml/ggml/src/ggml-cpu/cmake_install.cmake",
+		"C:/Users/Administrator/Documents/GitHub/ipex-llm/_build/ollama-ipex-latest/src/ollama/ollama-ollama-4589fa2/build-sycl/ml/backend/ggml/ggml/src/ggml-sycl/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

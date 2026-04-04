@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -42,6 +43,7 @@ import (
 	"github.com/ollama/ollama/logutil"
 	"github.com/ollama/ollama/manifest"
 	"github.com/ollama/ollama/middleware"
+	"github.com/ollama/ollama/ml"
 	"github.com/ollama/ollama/model/parsers"
 	"github.com/ollama/ollama/model/renderers"
 	"github.com/ollama/ollama/server/internal/client/ollama"
@@ -65,6 +67,52 @@ const (
 	cloudErrWebFetchUnavailable           = "web fetch is unavailable"
 	copilotChatUserAgentPrefix            = "GitHubCopilotChat/"
 )
+
+func defaultNumCtxForVRAM(totalVRAM uint64) int {
+	switch {
+	case totalVRAM >= 47*format.GibiByte:
+		return 262144
+	case totalVRAM >= 23*format.GibiByte:
+		return 32768
+	default:
+		return 4096
+	}
+}
+
+func defaultNumCtxForGPUs(gpus []ml.DeviceInfo, goos string) (uint64, int, string) {
+	var totalVRAM uint64
+	var discreteVRAM uint64
+	var hasIntegrated bool
+	var hasDiscrete bool
+
+	for _, gpu := range gpus {
+		usableVRAM := gpu.TotalMemory
+		if usableVRAM > envconfig.GpuOverhead() {
+			usableVRAM -= envconfig.GpuOverhead()
+		} else {
+			usableVRAM = 0
+		}
+
+		totalVRAM += usableVRAM
+		if gpu.Integrated {
+			hasIntegrated = true
+			continue
+		}
+
+		hasDiscrete = true
+		discreteVRAM += usableVRAM
+	}
+
+	if goos == "windows" && hasIntegrated {
+		if hasDiscrete {
+			return discreteVRAM, defaultNumCtxForVRAM(discreteVRAM), "windows discrete-vram default context"
+		}
+
+		return 0, 4096, "windows integrated-gpu default context"
+	}
+
+	return totalVRAM, defaultNumCtxForVRAM(totalVRAM), "vram-based default context"
+}
 
 func writeModelRefParseError(c *gin.Context, err error, fallbackStatus int, fallbackMessage string) {
 	switch {
@@ -1832,22 +1880,9 @@ func Serve(ln net.Listener) error {
 	gpus := discover.GPUDevices(ctx, nil)
 	discover.LogDetails(gpus)
 
-	var totalVRAM uint64
-	for _, gpu := range gpus {
-		totalVRAM += gpu.TotalMemory - envconfig.GpuOverhead()
-	}
-
-	// Set default context based on VRAM tier
-	// Use slightly lower thresholds (47/23 GiB vs. 48/24 GiB) to account for small differences in the exact value
-	switch {
-	case totalVRAM >= 47*format.GibiByte:
-		s.defaultNumCtx = 262144
-	case totalVRAM >= 23*format.GibiByte:
-		s.defaultNumCtx = 32768
-	default:
-		s.defaultNumCtx = 4096
-	}
-	slog.Info("vram-based default context", "total_vram", format.HumanBytes2(totalVRAM), "default_num_ctx", s.defaultNumCtx)
+	totalVRAM, defaultNumCtx, contextSource := defaultNumCtxForGPUs(gpus, runtime.GOOS)
+	s.defaultNumCtx = defaultNumCtx
+	slog.Info(contextSource, "total_vram", format.HumanBytes2(totalVRAM), "default_num_ctx", s.defaultNumCtx)
 
 	err = srvr.Serve(ln)
 	// If server is closed from the signal handler, wait for the ctx to be done

@@ -220,6 +220,64 @@ func TestLLMServerFitGPU(t *testing.T) {
 	}
 }
 
+func TestWindowsIntegratedGPUSchedulingBudget(t *testing.T) {
+	systemInfo := ml.SystemInfo{FreeMemory: 20 * format.GibiByte}
+	gpus := []ml.DeviceInfo{
+		{Integrated: true},
+		{Integrated: true},
+	}
+
+	budgetPerGPU, reserve := windowsIntegratedGPUSchedulingBudget(systemInfo, gpus, "windows")
+	if reserve != 4*format.GibiByte {
+		t.Fatalf("reserve = %d, want %d", reserve, 4*format.GibiByte)
+	}
+	if budgetPerGPU != 8*format.GibiByte {
+		t.Fatalf("budgetPerGPU = %d, want %d", budgetPerGPU, 8*format.GibiByte)
+	}
+
+	systemInfo = ml.SystemInfo{FreeMemory: 80 * format.GibiByte}
+	budgetPerGPU, reserve = windowsIntegratedGPUSchedulingBudget(systemInfo, gpus, "windows")
+	if reserve != 16*format.GibiByte {
+		t.Fatalf("reserve = %d, want %d", reserve, 16*format.GibiByte)
+	}
+	if budgetPerGPU != 10*format.GibiByte {
+		t.Fatalf("budgetPerGPU = %d, want %d", budgetPerGPU, 10*format.GibiByte)
+	}
+
+	budgetPerGPU, reserve = windowsIntegratedGPUSchedulingBudget(systemInfo, gpus, "linux")
+	if budgetPerGPU != 0 || reserve != 0 {
+		t.Fatalf("non-windows budget = (%d, %d), want (0, 0)", budgetPerGPU, reserve)
+	}
+}
+
+func TestIntegratedGPUMemoryRequirement(t *testing.T) {
+	systemGPUs := []ml.DeviceInfo{
+		{DeviceID: ml.DeviceID{ID: "igpu"}, Integrated: true},
+		{DeviceID: ml.DeviceID{ID: "dgpu"}},
+	}
+	memory := &ml.BackendMemory{
+		GPUs: []ml.DeviceMemory{
+			{DeviceID: ml.DeviceID{ID: "igpu"}, Graph: 3},
+			{DeviceID: ml.DeviceID{ID: "dgpu"}, Graph: 5},
+		},
+	}
+	gpuLayers := ml.GPULayersList{
+		{DeviceID: ml.DeviceID{ID: "igpu"}, Layers: []int{0, 2}},
+		{DeviceID: ml.DeviceID{ID: "dgpu"}, Layers: []int{1}},
+	}
+	layers := []uint64{10, 20, 30}
+
+	required := integratedGPUMemoryRequirement(systemGPUs, memory, gpuLayers, layers, "windows")
+	if required != 43 {
+		t.Fatalf("required = %d, want 43", required)
+	}
+
+	required = integratedGPUMemoryRequirement(systemGPUs, memory, gpuLayers, layers, "linux")
+	if required != 0 {
+		t.Fatalf("required = %d, want 0", required)
+	}
+}
+
 func TestLLMServerCompletionFormat(t *testing.T) {
 	// This test was written to fix an already deployed issue. It is a bit
 	// of a mess, and but it's good enough, until we can refactoring the

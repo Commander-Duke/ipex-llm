@@ -34,6 +34,28 @@ func TestSchedInit(t *testing.T) {
 	s.loadedMu.Unlock()
 }
 
+func TestNormalizeLoadRequestOptions(t *testing.T) {
+	tests := []struct {
+		name     string
+		numCtx   int
+		numBatch int
+		expected int
+	}{
+		{name: "short context keeps batch", numCtx: 16384, numBatch: 512, expected: 512},
+		{name: "32k context caps to 256", numCtx: 32768, numBatch: 512, expected: 256},
+		{name: "64k context caps to 128", numCtx: 65536, numBatch: 512, expected: 128},
+		{name: "128k context caps to 64", numCtx: 131072, numBatch: 512, expected: 64},
+		{name: "smaller requested batch is preserved", numCtx: 131072, numBatch: 32, expected: 32},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := normalizeLoadRequestOptions(api.Options{Runner: api.Runner{NumCtx: tt.numCtx, NumBatch: tt.numBatch}})
+			require.Equal(t, tt.expected, opts.NumBatch)
+		})
+	}
+}
+
 func TestSchedLoad(t *testing.T) {
 	ctx, done := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer done()

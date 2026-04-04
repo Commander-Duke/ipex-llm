@@ -2,6 +2,9 @@ package server
 
 import (
 	"testing"
+
+	"github.com/ollama/ollama/format"
+	"github.com/ollama/ollama/ml"
 )
 
 func TestModelOptionsNumCtxPriority(t *testing.T) {
@@ -121,6 +124,62 @@ func TestModelOptionsNumCtxPriority(t *testing.T) {
 
 			if opts.NumCtx != tt.expectedNumCtx {
 				t.Errorf("NumCtx = %d, want %d", opts.NumCtx, tt.expectedNumCtx)
+			}
+		})
+	}
+}
+
+func TestDefaultNumCtxForGPUs(t *testing.T) {
+	t.Setenv("OLLAMA_GPU_OVERHEAD", "0")
+
+	tests := []struct {
+		name           string
+		goos           string
+		gpus           []ml.DeviceInfo
+		expectedVRAM   uint64
+		expectedNumCtx int
+		expectedSource string
+	}{
+		{
+			name:           "discrete gpu uses vram tiers",
+			goos:           "linux",
+			gpus:           []ml.DeviceInfo{{TotalMemory: 48 * format.GibiByte}},
+			expectedVRAM:   48 * format.GibiByte,
+			expectedNumCtx: 262144,
+			expectedSource: "vram-based default context",
+		},
+		{
+			name:           "windows integrated gpu stays conservative",
+			goos:           "windows",
+			gpus:           []ml.DeviceInfo{{Integrated: true, TotalMemory: 92 * format.GibiByte}},
+			expectedVRAM:   0,
+			expectedNumCtx: 4096,
+			expectedSource: "windows integrated-gpu default context",
+		},
+		{
+			name: "windows mixed gpu ignores shared-memory igpu",
+			goos: "windows",
+			gpus: []ml.DeviceInfo{
+				{Integrated: true, TotalMemory: 92 * format.GibiByte},
+				{TotalMemory: 24 * format.GibiByte},
+			},
+			expectedVRAM:   24 * format.GibiByte,
+			expectedNumCtx: 32768,
+			expectedSource: "windows discrete-vram default context",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			totalVRAM, defaultNumCtx, source := defaultNumCtxForGPUs(tt.gpus, tt.goos)
+			if totalVRAM != tt.expectedVRAM {
+				t.Fatalf("totalVRAM = %d, want %d", totalVRAM, tt.expectedVRAM)
+			}
+			if defaultNumCtx != tt.expectedNumCtx {
+				t.Fatalf("defaultNumCtx = %d, want %d", defaultNumCtx, tt.expectedNumCtx)
+			}
+			if source != tt.expectedSource {
+				t.Fatalf("source = %q, want %q", source, tt.expectedSource)
 			}
 		})
 	}

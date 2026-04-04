@@ -1000,6 +1000,556 @@ endif()
     }
 }
 
+function Patch-WindowsSyclFlashAttentionSupport {
+    param([string]$OllamaRoot)
+
+    $devicePath = Join-Path $OllamaRoot "ml\device.go"
+    $deviceContent = Get-Content -LiteralPath $devicePath -Raw
+
+    if ($deviceContent -notmatch 'gpu\.Library == "SYCL"') {
+        $deviceContent = Replace-RequiredContent `
+            -Content $deviceContent `
+            -OldValue @'
+		supportsFA := gpu.Library == "cpu" ||
+			gpu.Name == "Metal" || gpu.Library == "Metal" ||
+			(gpu.Library == "CUDA" && gpu.DriverMajor >= 7 && !(gpu.ComputeMajor == 7 && gpu.ComputeMinor == 2)) ||
+			gpu.Library == "ROCm" ||
+			gpu.Library == "Vulkan"
+'@ `
+            -NewValue @'
+		supportsFA := gpu.Library == "cpu" ||
+			gpu.Name == "Metal" || gpu.Library == "Metal" ||
+			(gpu.Library == "CUDA" && gpu.DriverMajor >= 7 && !(gpu.ComputeMajor == 7 && gpu.ComputeMinor == 2)) ||
+			gpu.Library == "ROCm" ||
+			gpu.Library == "Vulkan" ||
+			gpu.Library == "SYCL"
+'@ `
+            -Description "SYCL flash attention capability"
+
+        Set-Content -LiteralPath $devicePath -Value $deviceContent -NoNewline
+    }
+}
+
+function Patch-WindowsSharedMemoryGpuScheduling {
+    param([string]$OllamaRoot)
+
+    $routesPath = Join-Path $OllamaRoot "server\routes.go"
+    $routesContent = Get-Content -LiteralPath $routesPath -Raw
+
+    if ($routesContent -notmatch "defaultNumCtxForGPUs") {
+        $routesContent = Replace-RequiredContent `
+            -Content $routesContent `
+            -OldValue @'
+	"os/signal"
+	"slices"
+'@ `
+            -NewValue @'
+	"os/signal"
+	"runtime"
+	"slices"
+'@ `
+            -Description "routes runtime import for context heuristics"
+
+        $routesContent = Replace-RequiredContent `
+            -Content $routesContent `
+            -OldValue @'
+	"github.com/ollama/ollama/manifest"
+	"github.com/ollama/ollama/middleware"
+	"github.com/ollama/ollama/model/parsers"
+'@ `
+            -NewValue @'
+	"github.com/ollama/ollama/manifest"
+	"github.com/ollama/ollama/middleware"
+	"github.com/ollama/ollama/ml"
+	"github.com/ollama/ollama/model/parsers"
+'@ `
+            -Description "routes ml import for gpu-aware defaults"
+
+        $routesContent = Replace-RequiredContent `
+            -Content $routesContent `
+            -OldValue @'
+const (
+	cloudErrRemoteInferenceUnavailable    = "remote model is unavailable"
+	cloudErrRemoteModelDetailsUnavailable = "remote model details are unavailable"
+	cloudErrWebSearchUnavailable          = "web search is unavailable"
+	cloudErrWebFetchUnavailable           = "web fetch is unavailable"
+	copilotChatUserAgentPrefix            = "GitHubCopilotChat/"
+)
+
+func writeModelRefParseError(c *gin.Context, err error, fallbackStatus int, fallbackMessage string) {
+'@ `
+            -NewValue @'
+const (
+	cloudErrRemoteInferenceUnavailable    = "remote model is unavailable"
+	cloudErrRemoteModelDetailsUnavailable = "remote model details are unavailable"
+	cloudErrWebSearchUnavailable          = "web search is unavailable"
+	cloudErrWebFetchUnavailable           = "web fetch is unavailable"
+	copilotChatUserAgentPrefix            = "GitHubCopilotChat/"
+)
+
+func defaultNumCtxForVRAM(totalVRAM uint64) int {
+	switch {
+	case totalVRAM >= 47*format.GibiByte:
+		return 262144
+	case totalVRAM >= 23*format.GibiByte:
+		return 32768
+	default:
+		return 4096
+	}
+}
+
+func defaultNumCtxForGPUs(gpus []ml.DeviceInfo, goos string) (uint64, int, string) {
+	var totalVRAM uint64
+	var discreteVRAM uint64
+	var hasIntegrated bool
+	var hasDiscrete bool
+
+	for _, gpu := range gpus {
+		usableVRAM := gpu.TotalMemory
+		if usableVRAM > envconfig.GpuOverhead() {
+			usableVRAM -= envconfig.GpuOverhead()
+		} else {
+			usableVRAM = 0
+		}
+
+		totalVRAM += usableVRAM
+		if gpu.Integrated {
+			hasIntegrated = true
+			continue
+		}
+
+		hasDiscrete = true
+		discreteVRAM += usableVRAM
+	}
+
+	if goos == "windows" && hasIntegrated {
+		if hasDiscrete {
+			return discreteVRAM, defaultNumCtxForVRAM(discreteVRAM), "windows discrete-vram default context"
+		}
+
+		return 0, 4096, "windows integrated-gpu default context"
+	}
+
+	return totalVRAM, defaultNumCtxForVRAM(totalVRAM), "vram-based default context"
+}
+
+func writeModelRefParseError(c *gin.Context, err error, fallbackStatus int, fallbackMessage string) {
+'@ `
+            -Description "gpu-aware default context helpers"
+
+        $routesContent = Replace-RequiredContent `
+            -Content $routesContent `
+            -OldValue @'
+	var totalVRAM uint64
+	for _, gpu := range gpus {
+		totalVRAM += gpu.TotalMemory - envconfig.GpuOverhead()
+	}
+
+	// Set default context based on VRAM tier
+	// Use slightly lower thresholds (47/23 GiB vs. 48/24 GiB) to account for small differences in the exact value
+	switch {
+	case totalVRAM >= 47*format.GibiByte:
+		s.defaultNumCtx = 262144
+	case totalVRAM >= 23*format.GibiByte:
+		s.defaultNumCtx = 32768
+	default:
+		s.defaultNumCtx = 4096
+	}
+	slog.Info("vram-based default context", "total_vram", format.HumanBytes2(totalVRAM), "default_num_ctx", s.defaultNumCtx)
+'@ `
+            -NewValue @'
+	totalVRAM, defaultNumCtx, contextSource := defaultNumCtxForGPUs(gpus, runtime.GOOS)
+	s.defaultNumCtx = defaultNumCtx
+	slog.Info(contextSource, "total_vram", format.HumanBytes2(totalVRAM), "default_num_ctx", s.defaultNumCtx)
+'@ `
+            -Description "windows shared-memory gpu default context handling"
+
+        Set-Content -LiteralPath $routesPath -Value $routesContent -NoNewline
+    }
+
+    $schedPath = Join-Path $OllamaRoot "server\sched.go"
+    $schedContent = Get-Content -LiteralPath $schedPath -Raw
+
+    if ($schedContent -notmatch "normalizeLoadRequestOptions") {
+        $schedContent = Replace-RequiredContent `
+            -Content $schedContent `
+            -OldValue @'
+var defaultModelsPerGPU = 3
+
+var ErrMaxQueue = errors.New("server busy, please try again.  maximum pending requests exceeded")
+
+func InitScheduler(ctx context.Context) *Scheduler {
+'@ `
+            -NewValue @'
+var defaultModelsPerGPU = 3
+
+var ErrMaxQueue = errors.New("server busy, please try again.  maximum pending requests exceeded")
+
+func capBatchSizeForContext(numCtx, numBatch int) int {
+	switch {
+	case numCtx >= 131072:
+		return min(numBatch, 64)
+	case numCtx >= 65536:
+		return min(numBatch, 128)
+	case numCtx >= 32768:
+		return min(numBatch, 256)
+	default:
+		return numBatch
+	}
+}
+
+func normalizeLoadRequestOptions(opts api.Options) api.Options {
+	opts.NumBatch = capBatchSizeForContext(opts.NumCtx, opts.NumBatch)
+	return opts
+}
+
+func InitScheduler(ctx context.Context) *Scheduler {
+'@ `
+            -Description "long-context batch normalization helpers"
+
+        $schedContent = Replace-RequiredContent `
+            -Content $schedContent `
+            -OldValue @'
+	if m.CheckCapabilities(model.CapabilityVision) == nil {
+		// multimodal models require at least 2048 context
+		opts.NumCtx = max(opts.NumCtx, 2048)
+	}
+
+	req := &LlmRequest{
+'@ `
+            -NewValue @'
+	if m.CheckCapabilities(model.CapabilityVision) == nil {
+		// multimodal models require at least 2048 context
+		opts.NumCtx = max(opts.NumCtx, 2048)
+	}
+
+	normalized := normalizeLoadRequestOptions(opts)
+	if normalized.NumBatch != opts.NumBatch {
+		slog.Info("reducing batch size for long context load", "num_ctx", normalized.NumCtx, "requested_num_batch", opts.NumBatch, "adjusted_num_batch", normalized.NumBatch)
+	}
+	opts = normalized
+
+	req := &LlmRequest{
+'@ `
+            -Description "apply long-context batch normalization"
+
+        Set-Content -LiteralPath $schedPath -Value $schedContent -NoNewline
+    }
+
+    $llmPath = Join-Path $OllamaRoot "llm\server.go"
+    $llmContent = Get-Content -LiteralPath $llmPath -Raw
+
+    if ($llmContent -notmatch "windowsIntegratedGPUSchedulingBudget") {
+        $llmContent = Replace-RequiredContent `
+            -Content $llmContent `
+            -OldValue '	gpuLayers, layers := s.buildLayout(systemGPUs, memory, requireFull, backoff)' `
+            -NewValue '	gpuLayers, layers := s.buildLayout(systemInfo, systemGPUs, memory, requireFull, backoff)' `
+            -Description "layout creation passes system memory context"
+
+        $llmContent = Replace-RequiredContent `
+            -Content $llmContent `
+            -OldValue @'
+func (s *llmServer) buildLayout(systemGPUs []ml.DeviceInfo, memory *ml.BackendMemory, requireFull bool, backoff float32) (ml.GPULayersList, []uint64) {
+'@ `
+            -NewValue @'
+func windowsIntegratedGPUHeadroom(freeMemory uint64) uint64 {
+	reserve := freeMemory / 5
+	minReserve := uint64(2 * format.GibiByte)
+	if reserve < minReserve {
+		reserve = minReserve
+	}
+	if reserve > freeMemory {
+		return freeMemory
+	}
+	return reserve
+}
+
+const windowsIntegratedGPUMaxOffloadBudget = 10 * format.GibiByte
+
+func windowsIntegratedGPUSchedulingBudget(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, goos string) (uint64, uint64) {
+	if goos != "windows" {
+		return 0, 0
+	}
+
+	var integratedCount uint64
+	for _, gpu := range gpus {
+		if gpu.Integrated {
+			integratedCount++
+		}
+	}
+	if integratedCount == 0 {
+		return 0, 0
+	}
+
+	reserve := windowsIntegratedGPUHeadroom(systemInfo.FreeMemory)
+	if systemInfo.FreeMemory <= reserve {
+		return 0, reserve
+	}
+
+	budgetPerGPU := (systemInfo.FreeMemory - reserve) / integratedCount
+	if budgetPerGPU > windowsIntegratedGPUMaxOffloadBudget {
+		budgetPerGPU = windowsIntegratedGPUMaxOffloadBudget
+	}
+
+	return budgetPerGPU, reserve
+}
+
+func isWindowsIntegratedGPU(goos string, gpu ml.DeviceInfo) bool {
+	return goos == "windows" && gpu.Integrated
+}
+
+func integratedGPUMemoryRequirement(systemGPUs []ml.DeviceInfo, memory *ml.BackendMemory, gpuLayers ml.GPULayersList, layers []uint64, goos string) uint64 {
+	if goos != "windows" {
+		return 0
+	}
+
+	integratedGPUByID := make(map[ml.DeviceID]struct{}, len(systemGPUs))
+	for _, gpu := range systemGPUs {
+		if gpu.Integrated {
+			integratedGPUByID[gpu.DeviceID] = struct{}{}
+		}
+	}
+
+	if len(integratedGPUByID) == 0 {
+		return 0
+	}
+
+	var sharedMemorySize uint64
+	for _, gl := range gpuLayers {
+		if _, ok := integratedGPUByID[gl.DeviceID]; !ok {
+			continue
+		}
+
+		for _, gpu := range memory.GPUs {
+			if gl.DeviceID == gpu.DeviceID {
+				sharedMemorySize += gpu.Graph
+				break
+			}
+		}
+
+		for _, layer := range gl.Layers {
+			sharedMemorySize += layers[layer]
+		}
+	}
+
+	return sharedMemorySize
+}
+
+func (s *llmServer) buildLayout(systemInfo ml.SystemInfo, systemGPUs []ml.DeviceInfo, memory *ml.BackendMemory, requireFull bool, backoff float32) (ml.GPULayersList, []uint64) {
+'@ `
+            -Description "windows integrated gpu scheduling helpers"
+
+        $llmContent = Replace-RequiredContent `
+            -Content $llmContent `
+            -OldValue @'
+	gpus := append(make([]ml.DeviceInfo, 0, len(systemGPUs)), systemGPUs...)
+	sort.Sort(sort.Reverse(ml.ByFreeMemory(gpus)))
+'@ `
+            -NewValue @'
+	gpus := append(make([]ml.DeviceInfo, 0, len(systemGPUs)), systemGPUs...)
+	sort.Sort(sort.Reverse(ml.ByFreeMemory(gpus)))
+	integratedBudgetPerGPU, integratedReserve := windowsIntegratedGPUSchedulingBudget(systemInfo, gpus, runtime.GOOS)
+'@ `
+            -Description "windows integrated gpu budget discovery"
+
+        $llmContent = Replace-RequiredContent `
+            -Content $llmContent `
+            -OldValue @'
+					reserved := uint64(float32(gl[i].FreeMemory)*backoff) + gl[i].MinimumMemory() + envconfig.GpuOverhead() + memory.GPUs[j].Graph
+					if gl[i].FreeMemory > reserved {
+						gl[i].FreeMemory -= reserved
+					} else {
+						gl[i].FreeMemory = 0
+					}
+
+					slog.Debug("available gpu", "id", gl[i].ID, "library", gl[i].Library,
+'@ `
+            -NewValue @'
+					usableFreeMemory := gl[i].FreeMemory
+					if isWindowsIntegratedGPU(runtime.GOOS, gl[i]) && integratedBudgetPerGPU > 0 && usableFreeMemory > integratedBudgetPerGPU {
+						slog.Debug("capping integrated gpu scheduling budget",
+							"id", gl[i].ID,
+							"library", gl[i].Library,
+							"reported_free", format.HumanBytes2(gl[i].FreeMemory),
+							"usable_free", format.HumanBytes2(integratedBudgetPerGPU),
+							"system_free", format.HumanBytes2(systemInfo.FreeMemory),
+							"system_reserve", format.HumanBytes2(integratedReserve))
+						usableFreeMemory = integratedBudgetPerGPU
+					}
+
+					reserved := uint64(float32(usableFreeMemory)*backoff) + gl[i].MinimumMemory() + envconfig.GpuOverhead() + memory.GPUs[j].Graph
+					if usableFreeMemory > reserved {
+						gl[i].FreeMemory = usableFreeMemory - reserved
+					} else {
+						gl[i].FreeMemory = 0
+					}
+
+					slog.Debug("available gpu", "id", gl[i].ID, "library", gl[i].Library,
+'@ `
+            -Description "windows integrated gpu scheduling cap"
+
+        $llmContent = Replace-RequiredContent `
+            -Content $llmContent `
+            -OldValue @'
+func (s *llmServer) verifyLayout(systemInfo ml.SystemInfo, systemGPUs []ml.DeviceInfo, memory *ml.BackendMemory, requireFull bool, gpuLayers ml.GPULayersList, layers []uint64) error {
+	// These sizes will only increase as we go through additional iterations and get additional information.
+	cpuSize := memory.InputWeights + memory.CPU.Graph
+	var vramSize uint64
+	for _, gl := range gpuLayers {
+		for _, gpu := range memory.GPUs {
+			if gl.DeviceID == gpu.DeviceID {
+				vramSize += gpu.Graph
+				break
+			}
+		}
+	}
+
+nextLayer:
+	for i := range layers {
+		for _, g := range gpuLayers {
+			for _, gl := range g.Layers {
+				if i == gl {
+					vramSize += layers[i]
+					continue nextLayer
+				}
+			}
+		}
+		cpuSize += layers[i]
+	}
+
+	if requireFull {
+		if len(systemGPUs) > 0 && gpuLayers.Sum() < len(layers) && (s.options.NumGPU < 0 || gpuLayers.Sum() < s.options.NumGPU) {
+			slog.Info("model requires more gpu memory than is currently available, evicting a model to make space", "loaded layers", gpuLayers.Sum())
+			return ErrLoadRequiredFull
+		}
+
+		if cpuSize > systemInfo.FreeMemory {
+			slog.Info("model requires more system memory than is currently available, evicting a model to make space", "required", cpuSize, "free", systemInfo.FreeMemory)
+			return fmt.Errorf("model requires more system memory than is currently available %w", ErrLoadRequiredFull)
+		}
+	}
+
+	// On linux and windows, over-allocating CPU memory will almost always result in an error
+	// Darwin has fully dynamic swap so has no direct concept of free swap space
+	if runtime.GOOS != "darwin" {
+		available := systemInfo.FreeMemory + systemInfo.FreeSwap
+		if cpuSize > available {
+			slog.Warn("model request too large for system", "requested", format.HumanBytes2(cpuSize), "available", format.HumanBytes2(available), "total", format.HumanBytes2(systemInfo.TotalMemory), "free", format.HumanBytes2(systemInfo.FreeMemory), "swap", format.HumanBytes2(systemInfo.FreeSwap))
+			return fmt.Errorf("model requires more system memory (%s) than is available (%s)", format.HumanBytes2(cpuSize), format.HumanBytes2(available))
+		}
+	} else {
+		if vramSize > systemInfo.TotalMemory {
+			// disable partial offloading when model is greater than total system memory as this
+			// can lead to locking up the system
+			s.options.NumGPU = 0
+			gpuLayers = ml.GPULayersList{}
+		}
+	}
+
+	if len(systemGPUs) > 0 && gpuLayers.Sum() == 0 {
+		slog.Debug("insufficient VRAM to load any model layers")
+	}
+
+	return nil
+}
+'@ `
+            -NewValue @'
+func (s *llmServer) verifyLayout(systemInfo ml.SystemInfo, systemGPUs []ml.DeviceInfo, memory *ml.BackendMemory, requireFull bool, gpuLayers ml.GPULayersList, layers []uint64) error {
+	// These sizes will only increase as we go through additional iterations and get additional information.
+	cpuSize := memory.InputWeights + memory.CPU.Graph
+	var vramSize uint64
+	sharedMemorySize := integratedGPUMemoryRequirement(systemGPUs, memory, gpuLayers, layers, runtime.GOOS)
+	for _, gl := range gpuLayers {
+		if sharedMemorySize > 0 {
+			for _, gpu := range systemGPUs {
+				if gl.DeviceID == gpu.DeviceID && gpu.Integrated {
+					goto nextGraph
+				}
+			}
+		}
+		for _, gpu := range memory.GPUs {
+			if gl.DeviceID == gpu.DeviceID {
+				vramSize += gpu.Graph
+				break
+			}
+		}
+
+	nextGraph:
+	}
+
+nextLayer:
+	for i := range layers {
+		for _, g := range gpuLayers {
+			for _, gl := range g.Layers {
+				if i == gl {
+					for _, gpu := range systemGPUs {
+						if g.DeviceID == gpu.DeviceID && gpu.Integrated && runtime.GOOS == "windows" {
+							continue nextLayer
+						}
+					}
+					vramSize += layers[i]
+					continue nextLayer
+				}
+			}
+		}
+		cpuSize += layers[i]
+	}
+
+	if requireFull {
+		if len(systemGPUs) > 0 && gpuLayers.Sum() < len(layers) && (s.options.NumGPU < 0 || gpuLayers.Sum() < s.options.NumGPU) {
+			slog.Info("model requires more gpu memory than is currently available, evicting a model to make space", "loaded layers", gpuLayers.Sum())
+			return ErrLoadRequiredFull
+		}
+
+		requiredSystemMemory := cpuSize + sharedMemorySize
+		if requiredSystemMemory > systemInfo.FreeMemory {
+			slog.Info("model requires more system memory than is currently available, evicting a model to make space", "required", requiredSystemMemory, "free", systemInfo.FreeMemory)
+			return fmt.Errorf("model requires more system memory than is currently available %w", ErrLoadRequiredFull)
+		}
+	}
+
+	// On linux and windows, over-allocating CPU memory will almost always result in an error
+	// Darwin has fully dynamic swap so has no direct concept of free swap space
+	if runtime.GOOS != "darwin" {
+		available := systemInfo.FreeMemory + systemInfo.FreeSwap
+		if runtime.GOOS == "windows" && sharedMemorySize > 0 {
+			available = systemInfo.FreeMemory
+		}
+
+		requiredSystemMemory := cpuSize + sharedMemorySize
+		if requiredSystemMemory > available {
+			slog.Warn("model request too large for system",
+				"requested", format.HumanBytes2(requiredSystemMemory),
+				"cpu", format.HumanBytes2(cpuSize),
+				"shared_gpu", format.HumanBytes2(sharedMemorySize),
+				"available", format.HumanBytes2(available),
+				"total", format.HumanBytes2(systemInfo.TotalMemory),
+				"free", format.HumanBytes2(systemInfo.FreeMemory),
+				"swap", format.HumanBytes2(systemInfo.FreeSwap))
+			return fmt.Errorf("model requires more system memory (%s) than is available (%s)", format.HumanBytes2(requiredSystemMemory), format.HumanBytes2(available))
+		}
+	} else {
+		if vramSize > systemInfo.TotalMemory {
+			// disable partial offloading when model is greater than total system memory as this
+			// can lead to locking up the system
+			s.options.NumGPU = 0
+			gpuLayers = ml.GPULayersList{}
+		}
+	}
+
+	if len(systemGPUs) > 0 && gpuLayers.Sum() == 0 {
+		slog.Debug("insufficient VRAM to load any model layers")
+	}
+
+	return nil
+}
+'@ `
+            -Description "windows shared-memory gpu system memory accounting"
+
+        Set-Content -LiteralPath $llmPath -Value $llmContent -NoNewline
+    }
+}
+
 function Patch-EmbeddingRequestContextDefaults {
     param([string]$OllamaRoot)
 
@@ -1397,6 +1947,16 @@ set "PATH=%~dp0;%~dp0lib\ollama;%~dp0lib\ollama\sycl;%PATH%"
 @REM Intel runtime stacks become unstable when it is forced globally. Leave it
 @REM as an opt-in environment override instead of enabling it by default.
 
+@REM Flash Attention plus a quantized KV cache dramatically lowers the memory
+@REM pressure of long-context runs. Keep them enabled by default on the
+@REM packaged Windows build, but allow users to override both knobs.
+if not defined OLLAMA_FLASH_ATTENTION (
+  set "OLLAMA_FLASH_ATTENTION=1"
+)
+if not defined OLLAMA_KV_CACHE_TYPE (
+  set "OLLAMA_KV_CACHE_TYPE=q8_0"
+)
+
 @REM Shared-memory Intel iGPUs can report a huge VRAM figure and make Ollama
 @REM pick an oversized default context. Keep a conservative default unless the
 @REM user explicitly overrides OLLAMA_CONTEXT_LENGTH before launch. Preserve a
@@ -1462,6 +2022,8 @@ function Write-BuildMetadata {
         legacy_ollama_num_ctx_passthrough = $true
         sycl_cache_persistent_default = $false
         sycl_cache_persistent_opt_in = $true
+        ollama_flash_attention_default = $true
+        ollama_kv_cache_type_default = "q8_0"
         ggml_sycl_f16      = $EnableExperimentalSyclF16.IsPresent
         ggml_sycl_dnn      = $EnableExperimentalSyclDnn.IsPresent
         ggml_sycl_graph    = $true
@@ -1513,6 +2075,8 @@ $syclSourceDir = Overlay-SyclSources -LlamaRoot $llamaSourceRoot -OllamaRoot $ol
 Patch-SyclCompatibility -SyclDir $syclSourceDir
 Patch-WindowsSyclIntegratedGpuSupport -OllamaRoot $ollamaSourceRoot -SyclDir $syclSourceDir
 Patch-WindowsSharedGgmlBaseName -OllamaRoot $ollamaSourceRoot
+Patch-WindowsSyclFlashAttentionSupport -OllamaRoot $ollamaSourceRoot
+Patch-WindowsSharedMemoryGpuScheduling -OllamaRoot $ollamaSourceRoot
 Patch-EmbeddingRequestContextDefaults -OllamaRoot $ollamaSourceRoot
 
 $vsDevCmd = Resolve-VsDevCmd
